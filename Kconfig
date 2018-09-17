@@ -1,0 +1,14 @@
+config I2C_AMD_MP2_PCI
+	tristate "AMD MP2 PCI"
+	depends on PCI
+
+config I2C_AMD_MP2_PLATFORM
+	tristate "AMD MP2 Platform"
+	select I2C_AMD_MP2_PCI
+	depends on ACPI
+	help
+	  If you say yes to this option, support will be included for the AMD MP2
+	  PCI I2C adapter.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called i2c-amd-plat-mp2.
