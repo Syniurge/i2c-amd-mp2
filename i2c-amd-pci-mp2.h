@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
  * AMD PCIe MP2 Communication Driver
  *
@@ -14,6 +14,7 @@
 #define PCI_DEVICE_ID_AMD_MP2	0x15E6
 
 struct amd_i2c_common;
+struct amd_mp2_dev;
 
 enum {
 	/* MP2 C2P Message Registers */
@@ -138,12 +139,14 @@ union i2c_event {
  * @length: message length
  * @buf: buffer address
  * @dma_addr: if length > 32, holds the DMA buffer address
+ * @dma_direction: if length > 32, is either FROM or TO device
  */
 struct i2c_rw_config {
 	u16 slave_addr;
 	u32 length;
 	u32 *buf;
 	dma_addr_t dma_addr;
+	enum dma_data_direction dma_direction;
 };
 
 /**
@@ -156,8 +159,10 @@ struct amd_i2c_pci_ops {
 };
 
 /**
- * struct amd_i2c_common - per bus/i2c adapter context
- * @eventval: MP2 event value set by the IRQ handler to be processed by the worker
+ * struct amd_i2c_common - per bus/i2c adapter context, shared
+ *		between the pci and the platform driver
+ * @eventval: MP2 event value set by the IRQ handler to be processed
+ *		by the worker
  * @ops: platdrv hooks
  * @rw_cfg: settings for reads/writes
  * @work: delayed worker struct
@@ -169,7 +174,7 @@ struct amd_i2c_pci_ops {
 struct amd_i2c_common {
 	union i2c_event eventval;
 	const struct amd_i2c_pci_ops *ops;
-	struct pci_dev *pci_dev;
+	struct amd_mp2_dev *mp2_dev;
 	struct i2c_rw_config rw_cfg;
 	struct delayed_work work;
 	enum i2c_cmd reqcmd;
@@ -179,13 +184,13 @@ struct amd_i2c_common {
 
 /**
  * struct amd_mp2_dev - per PCI device context
- * @pci_dev:
+ * @pci_dev: PCI driver node
  * @plat_common: MP2 devices may have up to two busses,
- * 		each bus corresponding to an i2c adapter
+ *		each bus corresponding to an i2c adapter
  * @mmio: iommapped registers
  * @lock: interrupt spinlock
  * @c2p_lock: controls access to the C2P mailbox shared between
- * 		the two adapters
+ *		the two adapters
  */
 struct amd_mp2_dev {
 	struct pci_dev *pci_dev;
@@ -201,15 +206,19 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common);
 int amd_mp2_write(struct amd_i2c_common *i2c_common);
 int amd_mp2_connect(struct amd_i2c_common *i2c_common, bool enable);
 
-int amd_i2c_register_cb(struct pci_dev *pci_dev,
+int amd_i2c_register_cb(struct amd_mp2_dev *mp2_dev,
 			struct amd_i2c_common *i2c_common);
-int amd_i2c_unregister_cb(struct pci_dev *pci_dev,
-			struct amd_i2c_common *i2c_common);
+int amd_i2c_unregister_cb(struct amd_mp2_dev *mp2_dev,
+			  struct amd_i2c_common *i2c_common);
+
+struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate);
 
 #define ndev_pdev(ndev) ((ndev)->pci_dev)
 #define ndev_name(ndev) pci_name(ndev_pdev(ndev))
 #define ndev_dev(ndev) (&ndev_pdev(ndev)->dev)
-#define work_amd_i2c_common(__work) container_of(__work, struct amd_i2c_common, work.work)
-#define event_amd_i2c_common(__event) container_of(__event, struct amd_i2c_common, eventval)
+#define work_amd_i2c_common(__work) \
+	container_of(__work, struct amd_i2c_common, work.work)
+#define event_amd_i2c_common(__event) \
+	container_of(__event, struct amd_i2c_common, eventval)
 
 #endif

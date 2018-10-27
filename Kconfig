@@ -1,5 +1,5 @@
 config I2C_AMD_MP2_PCI
-	tristate "AMD MP2 PCI"
+	tristate
 	depends on PCI
 
 config I2C_AMD_MP2_PLATFORM
