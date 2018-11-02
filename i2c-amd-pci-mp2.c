@@ -19,9 +19,6 @@
 #define DRIVER_DESC	"AMD(R) PCI-E MP2 Communication Driver"
 #define DRIVER_VER	"1.0"
 
-static const struct file_operations amd_mp2_debugfs_info;
-static struct dentry *debugfs_dir;
-
 #define write64 _write64
 static inline void _write64(u64 val, void __iomem *mmio)
 {
@@ -184,12 +181,9 @@ int amd_mp2_write(struct amd_i2c_common *i2c_common)
 }
 EXPORT_SYMBOL_GPL(amd_mp2_write);
 
-static void amd_mp2_pci_do_work(struct work_struct *work)
+static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 {
-	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-	int sts = i2c_common->eventval.r.status;
-	int res = i2c_common->eventval.r.response;
 	int len = i2c_common->eventval.r.length;
 	u32 slave_addr = i2c_common->eventval.r.slave_addr;
 
@@ -201,6 +195,20 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 		dev_err(ndev_dev(privdata),
 			"unexpected slave address %x (expected: %x)!\n",
 			slave_addr, i2c_common->rw_cfg.slave_addr);
+}
+
+static void amd_mp2_pci_do_work(struct work_struct *work)
+{
+	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+	int sts = i2c_common->eventval.r.status;
+	int res = i2c_common->eventval.r.response;
+	int len = i2c_common->eventval.r.length;
+
+	if ((i2c_common->reqcmd == i2c_read ||
+	     i2c_common->reqcmd == i2c_write) &&
+	    i2c_common->rw_cfg.length > 32)
+		amd_mp2_dma_unmap(privdata, i2c_common);
 
 	if (res != command_success) {
 		if (res == command_failed)
@@ -213,6 +221,7 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 	switch (i2c_common->reqcmd) {
 	case i2c_read:
 		if (sts == i2c_readcomplete_event) {
+			amd_mp2_pci_check_rw_event(i2c_common);
 			if (len <= 32)
 				memcpy_fromio(i2c_common->rw_cfg.buf,
 					      privdata->mmio + AMD_C2P_MSG2,
@@ -220,35 +229,44 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 		} else if (sts == i2c_readfail_event) {
 			dev_err(ndev_dev(privdata), "i2c read failed!\n");
 		} else {
-			dev_err(ndev_dev(privdata), "invalid i2c status after read!\n");
+			dev_err(ndev_dev(privdata),
+				"invalid i2c status after read (%d)!\n", sts);
 		}
 
 		i2c_common->ops->read_complete(&i2c_common->eventval);
 		break;
 	case i2c_write:
-		if (sts == i2c_writefail_event)
+		if (sts == i2c_writecomplete_event)
+			amd_mp2_pci_check_rw_event(i2c_common);
+		else if (sts == i2c_writefail_event)
 			dev_err(ndev_dev(privdata), "i2c write failed!\n");
-		else if (sts != i2c_writecomplete_event)
-			dev_err(ndev_dev(privdata), "invalid i2c status after write!\n");
+		else
+			dev_err(ndev_dev(privdata),
+				"invalid i2c status after write (%d)!\n", sts);
 
 		i2c_common->ops->write_complete(&i2c_common->eventval);
 		break;
 	case i2c_enable:
-		if (sts == i2c_busdisable_failed)
+		if (sts == i2c_busenable_failed)
 			dev_err(ndev_dev(privdata), "i2c bus enable failed!\n");
 		else if (sts != i2c_busenable_complete)
-			dev_err(ndev_dev(privdata), "invalid i2c status after bus enable!\n");
+			dev_err(ndev_dev(privdata),
+				"invalid i2c status after bus enable (%d)!\n", sts);
+
+		i2c_common->ops->connect_complete(&i2c_common->eventval);
+		break;
+	case i2c_disable:
+		if (sts == i2c_busdisable_failed)
+			dev_err(ndev_dev(privdata), "i2c bus disable failed!\n");
+		else if (sts != i2c_busdisable_complete)
+			dev_err(ndev_dev(privdata),
+				"invalid i2c status after bus disable (%d)!\n", sts);
 
 		i2c_common->ops->connect_complete(&i2c_common->eventval);
 		break;
 	default:
 		break;
 	}
-
-	if ((i2c_common->reqcmd == i2c_read ||
-	     i2c_common->reqcmd == i2c_write) &&
-	    i2c_common->rw_cfg.length > 32)
-		amd_mp2_dma_unmap(privdata, i2c_common);
 }
 
 static void amd_mp2_pci_work(struct work_struct *work)
@@ -324,6 +342,10 @@ int amd_i2c_unregister_cb(struct amd_mp2_dev *privdata,
 }
 EXPORT_SYMBOL_GPL(amd_i2c_unregister_cb);
 
+#ifdef CONFIG_DEBUG_FS
+static const struct file_operations amd_mp2_debugfs_info;
+static struct dentry *debugfs_root_dir;
+
 static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 				    size_t count, loff_t *offp)
 {
@@ -331,8 +353,9 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 	void __iomem *mmio;
 	u8 *buf;
 	size_t buf_size;
-	ssize_t ret, off;
+	ssize_t ret, off = 0;
 	u32 v32;
+	int i;
 
 	privdata = filp->private_data;
 	mmio = privdata->mmio;
@@ -342,64 +365,28 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 	if (!buf)
 		return -ENOMEM;
 
-	off = 0;
 	off += scnprintf(buf + off, buf_size - off,
-			"Mp2 Device Information:\n");
+			 "Mp2 Device Information:\n");
 
 	off += scnprintf(buf + off, buf_size - off,
-			"========================\n");
+			 "========================\n");
 	off += scnprintf(buf + off, buf_size - off,
-			"\tMP2 C2P Message Register Dump:\n\n");
-	v32 = readl(privdata->mmio + AMD_C2P_MSG0);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG0 -\t\t\t%#06x\n", v32);
+			 "\tMP2 C2P Message Register Dump:\n\n");
 
-	v32 = readl(privdata->mmio + AMD_C2P_MSG1);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG1 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG2);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG2 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG3);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG3 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG4);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG4 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG5);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG5 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG6);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG6 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG7);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG7 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG8);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG8 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_C2P_MSG9);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_C2P_MSG9 -\t\t\t%#06x\n", v32);
+	for (i = 0; i < 10; i++) {
+		v32 = readl(privdata->mmio + AMD_C2P_MSG0 + i*4);
+		off += scnprintf(buf + off, buf_size - off,
+				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i, v32);
+	}
 
 	off += scnprintf(buf + off, buf_size - off,
 			"\n\tMP2 P2C Message Register Dump:\n\n");
 
-	v32 = readl(privdata->mmio + AMD_P2C_MSG1);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_P2C_MSG1 -\t\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_P2C_MSG2);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_P2C_MSG2 -\t\t\t%#06x\n", v32);
+	for (i = 0; i < 2; i++) {
+		v32 = readl(privdata->mmio + AMD_P2C_MSG1 + i*4);
+		off += scnprintf(buf + off, buf_size - off,
+				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i+1, v32);
+	}
 
 	v32 = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
 	off += scnprintf(buf + off, buf_size - off,
@@ -414,16 +401,19 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 	return ret;
 }
 
+static const struct file_operations amd_mp2_debugfs_info = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.read = amd_mp2_debugfs_read,
+};
+
 static void amd_mp2_init_debugfs(struct amd_mp2_dev *privdata)
 {
-	if (!debugfs_dir) {
-		privdata->debugfs_dir = NULL;
-		privdata->debugfs_info = NULL;
+	if (!debugfs_root_dir)
 		return;
-	}
 
 	privdata->debugfs_dir = debugfs_create_dir(ndev_name(privdata),
-						   debugfs_dir);
+						   debugfs_root_dir);
 	if (!privdata->debugfs_dir) {
 		privdata->debugfs_info = NULL;
 	} else {
@@ -432,11 +422,7 @@ static void amd_mp2_init_debugfs(struct amd_mp2_dev *privdata)
 			 privdata, &amd_mp2_debugfs_info);
 	}
 }
-
-static void amd_mp2_deinit_debugfs(struct amd_mp2_dev *privdata)
-{
-	debugfs_remove_recursive(privdata->debugfs_dir);
-}
+#endif /* CONFIG_DEBUG_FS */
 
 static void amd_mp2_clear_reg(struct amd_mp2_dev *privdata)
 {
@@ -453,17 +439,21 @@ static int amd_mp2_pci_init(struct amd_mp2_dev *privdata,
 			    struct pci_dev *pci_dev)
 {
 	int rc;
-	resource_size_t size, base;
 
 	pci_set_drvdata(pci_dev, privdata);
 
-	rc = pci_enable_device(pci_dev);
-	if (rc)
+	rc = pcim_enable_device(pci_dev);
+	if (rc) {
+		dev_err(ndev_dev(privdata), "Failed to enable MP2 PCI device\n");
 		goto err_pci_enable;
+	}
 
-	rc = pci_request_regions(pci_dev, DRIVER_NAME);
-	if (rc)
-		goto err_pci_regions;
+	rc = pcim_iomap_regions(pci_dev, 1 << 2, pci_name(pci_dev));
+	if (rc) {
+		dev_err(ndev_dev(privdata), "I/O memory remapping failed\n");
+		goto err_pci_enable;
+	}
+	privdata->mmio = pcim_iomap_table(pci_dev)[2];
 
 	pci_set_master(pci_dev);
 
@@ -475,58 +465,24 @@ static int amd_mp2_pci_init(struct amd_mp2_dev *privdata,
 		dev_warn(ndev_dev(privdata), "Cannot DMA highmem\n");
 	}
 
-	rc = pci_set_consistent_dma_mask(pci_dev, DMA_BIT_MASK(64));
-	if (rc) {
-		rc = pci_set_consistent_dma_mask(pci_dev, DMA_BIT_MASK(32));
-		if (rc)
-			goto err_dma_mask;
-		dev_warn(ndev_dev(privdata), "Cannot DMA consistent highmem\n");
-	}
-
-	base = pci_resource_start(pci_dev, 2);
-	size = pci_resource_len(pci_dev, 2);
-	dev_dbg(ndev_dev(privdata), "Base addr:%zx size:%zx\n",
-		(size_t)base, (size_t)size);
-
 	mutex_init(&privdata->c2p_lock);
-	privdata->mmio = ioremap(base, size);
-	if (!privdata->mmio) {
-		rc = -EIO;
-		goto err_dma_mask;
-	}
 
 	/* Try to set up intx irq */
 	raw_spin_lock_init(&privdata->lock);
 	pci_intx(pci_dev, 1);
-	rc = request_irq(pci_dev->irq, amd_mp2_irq_isr, IRQF_SHARED,
-			 "mp2_irq_isr", privdata);
+	rc = devm_request_irq(&pci_dev->dev, pci_dev->irq, amd_mp2_irq_isr,
+			      IRQF_SHARED, dev_name(&pci_dev->dev), privdata);
 	if (rc)
-		goto err_intx_request;
+		dev_err(&pci_dev->dev, "Failure requesting irq %i: %d\n",
+			pci_dev->irq, rc);
 
-	return 0;
-
-err_intx_request:
 	return rc;
+
 err_dma_mask:
 	pci_clear_master(pci_dev);
-	pci_release_regions(pci_dev);
-err_pci_regions:
-	pci_disable_device(pci_dev);
 err_pci_enable:
 	pci_set_drvdata(pci_dev, NULL);
 	return rc;
-}
-
-static void amd_mp2_pci_deinit(struct amd_mp2_dev *privdata)
-{
-	struct pci_dev *pci_dev = ndev_pdev(privdata);
-
-	pci_iounmap(pci_dev, privdata->mmio);
-
-	pci_clear_master(pci_dev);
-	pci_release_regions(pci_dev);
-	pci_disable_device(pci_dev);
-	pci_set_drvdata(pci_dev, NULL);
 }
 
 static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
@@ -546,28 +502,21 @@ static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
 		 (int)pci_dev->vendor, (int)pci_dev->device,
 		 (int)pci_dev->revision);
 
-	privdata = kzalloc(sizeof(*privdata), GFP_KERNEL);
+	privdata = devm_kzalloc(&pci_dev->dev, sizeof(*privdata), GFP_KERNEL);
 	if (!privdata) {
-		rc = -ENOMEM;
-		goto err_dev;
+		dev_err(&pci_dev->dev, "Memory allocation Failed\n");
+		return -ENOMEM;
 	}
 
 	privdata->pci_dev = pci_dev;
 
 	rc = amd_mp2_pci_init(privdata, pci_dev);
 	if (rc)
-		goto err_pci_init;
-	dev_dbg(&pci_dev->dev, "pci init done.\n");
+		return rc;
 
 	amd_mp2_init_debugfs(privdata);
 	dev_info(&pci_dev->dev, "MP2 device registered.\n");
 	return 0;
-
-err_pci_init:
-	kfree(privdata);
-err_dev:
-	dev_err(&pci_dev->dev, "Memory Allocation Failed\n");
-	return rc;
 }
 
 static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
@@ -580,19 +529,14 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 			amd_i2c_unregister_cb(privdata,
 					      privdata->plat_common[bus_id]);
 
-	amd_mp2_deinit_debugfs(privdata);
-	amd_mp2_clear_reg(privdata);
-	free_irq(pci_dev->irq, privdata);
-	pci_intx(pci_dev, 0);
-	amd_mp2_pci_deinit(privdata);
-	kfree(privdata);
-}
+	if (privdata->debugfs_dir)
+		debugfs_remove_recursive(privdata->debugfs_dir);
 
-static const struct file_operations amd_mp2_debugfs_info = {
-	.owner = THIS_MODULE,
-	.open = simple_open,
-	.read = amd_mp2_debugfs_read,
-};
+	amd_mp2_clear_reg(privdata);
+
+	pci_intx(pci_dev, 0);
+	pci_clear_master(pci_dev);
+}
 
 static const struct pci_device_id amd_mp2_pci_tbl[] = {
 	{PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_MP2)},
@@ -651,8 +595,8 @@ static struct pci_driver amd_mp2_pci_driver = {
 	.probe		= amd_mp2_pci_probe,
 	.remove		= amd_mp2_pci_remove,
 #ifdef CONFIG_PM_SLEEP
-	.suspend		= amd_mp2_pci_device_suspend,
-	.resume			= amd_mp2_pci_device_resume,
+	.suspend	= amd_mp2_pci_device_suspend,
+	.resume		= amd_mp2_pci_device_resume,
 #endif
 };
 
@@ -672,9 +616,6 @@ struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate)
 
 	dev = driver_find_device(&amd_mp2_pci_driver.driver, NULL, candidate,
 				 amd_mp2_device_match);
-	if (!dev && candidate)
-		dev = driver_find_device(&amd_mp2_pci_driver.driver, NULL, NULL,
-					 amd_mp2_device_match);
 	if (!dev)
 		return NULL;
 
@@ -685,9 +626,9 @@ EXPORT_SYMBOL_GPL(amd_mp2_find_device);
 
 static int __init amd_mp2_pci_driver_init(void)
 {
-	if (debugfs_initialized())
-		debugfs_dir = debugfs_create_dir(KBUILD_MODNAME, NULL);
-
+#ifdef CONFIG_DEBUG_FS
+	debugfs_root_dir = debugfs_create_dir(KBUILD_MODNAME, NULL);
+#endif /* CONFIG_DEBUG_FS */
 	return pci_register_driver(&amd_mp2_pci_driver);
 }
 module_init(amd_mp2_pci_driver_init);
@@ -695,7 +636,9 @@ module_init(amd_mp2_pci_driver_init);
 static void __exit amd_mp2_pci_driver_exit(void)
 {
 	pci_unregister_driver(&amd_mp2_pci_driver);
-	debugfs_remove_recursive(debugfs_dir);
+#ifdef CONFIG_DEBUG_FS
+	debugfs_remove_recursive(debugfs_root_dir);
+#endif /* CONFIG_DEBUG_FS */
 }
 module_exit(amd_mp2_pci_driver_exit);
 

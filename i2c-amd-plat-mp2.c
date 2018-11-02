@@ -83,9 +83,9 @@ static int i2c_amd_connect_completion(union i2c_event *event)
 }
 
 static const struct amd_i2c_pci_ops data_handler = {
-		.read_complete = i2c_amd_read_completion,
-		.write_complete = i2c_amd_write_completion,
-		.connect_complete = i2c_amd_connect_completion,
+	.read_complete = i2c_amd_read_completion,
+	.write_complete = i2c_amd_write_completion,
+	.connect_complete = i2c_amd_connect_completion,
 };
 
 static int i2c_amd_pci_configure(struct amd_i2c_dev *i2c_dev)
@@ -104,6 +104,7 @@ static int i2c_amd_pci_xconnect(struct amd_i2c_dev *i2c_dev, bool enable)
 	unsigned long timeout;
 
 	reinit_completion(&i2c_dev->msg_complete);
+
 	amd_mp2_connect(i2c_common, enable);
 	timeout = wait_for_completion_timeout(&i2c_dev->msg_complete,
 					      AMD_I2C_TIMEOUT);
@@ -231,10 +232,9 @@ static struct device *i2c_amd_acpi_get_first_phys_node(struct acpi_device *adev)
 }
 
 /*
- * Assume that the first device listed by the _DEP method is the parent
- * MP2 device
+ * Take the first PCI device listed by the _DEP method as a hint
  */
-static struct pci_dev *i2c_amd_find_pci_parent(struct acpi_device *adev)
+static struct pci_dev *i2c_amd_find_pci_parent_hint(struct acpi_device *adev)
 {
 	struct acpi_device *parent_adev;
 	struct device *phys_dev;
@@ -266,6 +266,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
 	struct acpi_device *adev;
 	struct pci_dev *parent_candidate = NULL;
+	struct amd_mp2_dev* mp2_dev;
 
 	i2c_dev = devm_kzalloc(dev, sizeof(*i2c_dev), GFP_KERNEL);
 	if (!i2c_dev)
@@ -302,6 +303,8 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	/* setup i2c adapter description */
 	i2c_dev->adapter.owner = THIS_MODULE;
 	i2c_dev->adapter.algo = &i2c_amd_algorithm;
+	i2c_dev->adapter.timeout = AMD_I2C_TIMEOUT;
+	i2c_dev->adapter.retries = 3;
 	i2c_dev->adapter.quirks = &amd_i2c_dev_quirks;
 	i2c_dev->adapter.dev.parent = dev;
 	i2c_dev->adapter.algo_data = i2c_dev;
@@ -311,14 +314,18 @@ static int i2c_amd_probe(struct platform_device *pdev)
 		 "i2c_dev-i2c", dev_name(pdev->dev.parent));
 
 	if (adev)
-		parent_candidate = i2c_amd_find_pci_parent(adev);
-	i2c_dev->i2c_common.mp2_dev = amd_mp2_find_device(parent_candidate);
-	if (!i2c_dev->i2c_common.mp2_dev) {
+		parent_candidate = i2c_amd_find_pci_parent_hint(adev);
+
+	mp2_dev = amd_mp2_find_device(parent_candidate);
+	if (!mp2_dev && parent_candidate)
+		mp2_dev = amd_mp2_find_device(NULL);
+	if (!mp2_dev) {
 		dev_err(&pdev->dev,
 			"%s Could not find MP2 PCI device for i2c adapter\n",
 		       __func__);
 		return -EINVAL;
 	}
+	i2c_dev->i2c_common.mp2_dev = mp2_dev;
 
 	platform_set_drvdata(pdev, i2c_dev);
 
@@ -350,19 +357,18 @@ static int i2c_amd_remove(struct platform_device *pdev)
 }
 
 static const struct acpi_device_id i2c_amd_acpi_match[] = {
-		{ "AMDI0011" },
-		{ },
+	{ "AMDI0011" },
+	{ },
 };
 MODULE_DEVICE_TABLE(acpi, i2c_amd_acpi_match);
 
 static struct platform_driver amd_i2c_plat_driver = {
-		.probe = i2c_amd_probe,
-		.remove = i2c_amd_remove,
-		.driver = {
-				.name = "i2c_amd_plat_mp2",
-				.acpi_match_table = ACPI_PTR
-						(i2c_amd_acpi_match),
-		},
+	.probe = i2c_amd_probe,
+	.remove = i2c_amd_remove,
+	.driver = {
+		.name = "i2c_amd_plat_mp2",
+		.acpi_match_table = ACPI_PTR(i2c_amd_acpi_match),
+	},
 };
 
 module_platform_driver(amd_i2c_plat_driver);

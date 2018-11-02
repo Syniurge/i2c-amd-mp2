@@ -34,8 +34,8 @@ enum {
 	AMD_P2C_MSG1 = 0x10684,			/* I2C0 interrupt register */
 	AMD_P2C_MSG2 = 0x10688,			/* I2C1 interrupt register */
 	AMD_P2C_MSG3 = 0x1068C,			/* MP2 debug info */
-	AMD_P2C_MSG_INTEN = 0x10690,	/* MP2 interrupt gen register */
-	AMD_P2C_MSG_INTSTS = 0x10694,	/* Interrupt status */
+	AMD_P2C_MSG_INTEN = 0x10690,		/* MP2 interrupt gen register */
+	AMD_P2C_MSG_INTSTS = 0x10694,		/* Interrupt status */
 };
 
 /* Command register data structures */
@@ -198,8 +198,10 @@ struct amd_mp2_dev {
 	void __iomem *mmio;
 	raw_spinlock_t lock;
 	struct mutex c2p_lock;
+#ifdef CONFIG_DEBUG_FS
 	struct dentry *debugfs_dir;
 	struct dentry *debugfs_info;
+#endif /* CONFIG_DEBUG_FS */
 };
 
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
