@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * AMD MP2 I2C Adapter Driver
+ * AMD MP2 I2C adapter driver
  *
  * Authors: Shyam Sundar S K <Shyam-sundar.S-k@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -180,7 +180,8 @@ struct amd_i2c_common {
  * @mmio: iommapped registers
  * @lock: interrupt spinlock
  * @c2p_lock: controls access to the C2P mailbox shared between
- *		the two adapters
+ *	      the two adapters
+ * @c2p_lock_busid: id of the adapter which locked c2p_lock
  */
 struct amd_mp2_dev {
 	struct pci_dev *pci_dev;
@@ -188,6 +189,7 @@ struct amd_mp2_dev {
 	void __iomem *mmio;
 	raw_spinlock_t lock;
 	struct mutex c2p_lock;
+	u8 c2p_lock_busid;
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *debugfs_dir;
 	struct dentry *debugfs_info;
@@ -195,6 +197,9 @@ struct amd_mp2_dev {
 };
 
 /* PCIe communication driver */
+
+void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common);
+void amd_mp2_c2p_mutex_unlock(struct amd_i2c_common *i2c_common);
 
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
 int amd_mp2_write(struct amd_i2c_common *i2c_common);

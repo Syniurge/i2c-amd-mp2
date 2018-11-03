@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * AMD MP2 PCIe Communication Driver
+ * AMD MP2 PCIe communication driver
  *
  * Authors: Shyam Sundar S K <Shyam-sundar.S-k@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -34,6 +34,29 @@ static inline u64 _read64(void __iomem *mmio)
 	low = readl(mmio);
 	high = readl(mmio + sizeof(u32));
 	return low | (high << 32);
+}
+
+void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common)
+{
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
+	/* there is only one data mailbox for two i2c adapters */
+	mutex_lock(&privdata->c2p_lock);
+	privdata->c2p_lock_busid = i2c_common->bus_id;
+}
+
+void amd_mp2_c2p_mutex_unlock(struct amd_i2c_common *i2c_common)
+{
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
+	if (unlikely(privdata->c2p_lock_busid != i2c_common->bus_id)) {
+		dev_warn(ndev_dev(privdata),
+			 "bus %d attempting to unlock C2P locked by bus %d\n",
+			 i2c_common->bus_id, privdata->c2p_lock_busid);
+		return;
+	}
+
+	mutex_unlock(&privdata->c2p_lock);
 }
 
 static int amd_mp2_cmd(struct amd_mp2_dev *privdata,
@@ -126,9 +149,7 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common)
 		i2c_common->rw_cfg.slave_addr, i2c_common->bus_id);
 
 	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, i2c_read);
-
-	/* there is only one data mailbox for two i2c adapters */
-	mutex_lock(&privdata->c2p_lock);
+	amd_mp2_c2p_mutex_lock(i2c_common);
 
 	if (!i2c_common->rw_cfg.buf) {
 		dev_err(ndev_dev(privdata), "%s no mem for buf received\n",
@@ -158,9 +179,7 @@ int amd_mp2_write(struct amd_i2c_common *i2c_common)
 		i2c_common->rw_cfg.slave_addr, i2c_common->bus_id);
 
 	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, i2c_write);
-
-	/* there is only one data mailbox for two i2c adapters */
-	mutex_lock(&privdata->c2p_lock);
+	amd_mp2_c2p_mutex_lock(i2c_common);
 
 	if (i2c_common->rw_cfg.length <= 32) {
 		i2c_cmd_base.s.mem_type = use_c2pmsg;
@@ -363,7 +382,7 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 		return -ENOMEM;
 
 	off += scnprintf(buf + off, buf_size - off,
-			 "Mp2 Device Information:\n");
+			 "MP2 Device Information:\n");
 
 	off += scnprintf(buf + off, buf_size - off,
 			 "========================\n");

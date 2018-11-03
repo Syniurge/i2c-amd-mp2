@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * AMD MP2 Platform Driver for ACPI namespace lookups
+ * AMD MP2 platform driver for ACPI namespace lookups
  *
  * Authors: Nehal Bakulchandra Shah <Nehal-bakulchandra.shah@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -127,6 +127,7 @@ static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 		dev_err(&i2c_dev->pdev->dev,
 			"i2c %s timed out\n",
 			is_read ? "read" : "write");
+		amd_mp2_c2p_mutex_unlock(i2c_common);
 		return -ETIMEDOUT;
 	}
 
