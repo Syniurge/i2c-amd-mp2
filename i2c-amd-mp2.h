@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * AMD PCIe MP2 Communication Driver
+ * AMD MP2 I2C Adapter Driver
  *
  * Authors: Shyam Sundar S K <Shyam-sundar.S-k@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -150,15 +150,6 @@ struct i2c_rw_config {
 };
 
 /**
- * struct amd_i2c_pci_ops - platdrv hooks
- */
-struct amd_i2c_pci_ops {
-	int (*read_complete)(union i2c_event *event);
-	int (*write_complete)(union i2c_event *event);
-	int (*connect_complete)(union i2c_event *event);
-};
-
-/**
  * struct amd_i2c_common - per bus/i2c adapter context, shared
  *		between the pci and the platform driver
  * @eventval: MP2 event value set by the IRQ handler to be processed
@@ -173,7 +164,6 @@ struct amd_i2c_pci_ops {
  */
 struct amd_i2c_common {
 	union i2c_event eventval;
-	const struct amd_i2c_pci_ops *ops;
 	struct amd_mp2_dev *mp2_dev;
 	struct i2c_rw_config rw_cfg;
 	struct delayed_work work;
@@ -204,6 +194,8 @@ struct amd_mp2_dev {
 #endif /* CONFIG_DEBUG_FS */
 };
 
+/* PCIe communication driver */
+
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
 int amd_mp2_write(struct amd_i2c_common *i2c_common);
 int amd_mp2_connect(struct amd_i2c_common *i2c_common, bool enable);
@@ -214,6 +206,15 @@ int amd_i2c_unregister_cb(struct amd_mp2_dev *mp2_dev,
 			  struct amd_i2c_common *i2c_common);
 
 struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate);
+
+/* Platform driver */
+
+void i2c_amd_read_completion(union i2c_event *event);
+void i2c_amd_write_completion(union i2c_event *event);
+void i2c_amd_connect_completion(union i2c_event *event);
+
+int i2c_amd_register_driver(void);
+void i2c_amd_unregister_driver(void);
 
 #define ndev_pdev(ndev) ((ndev)->pci_dev)
 #define ndev_name(ndev) pci_name(ndev_pdev(ndev))

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * AMD PCIe MP2 Communication Driver
+ * AMD MP2 PCIe Communication Driver
  *
  * Authors: Shyam Sundar S K <Shyam-sundar.S-k@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -13,10 +13,10 @@
 #include <linux/pci.h>
 #include <linux/slab.h>
 
-#include "i2c-amd-pci-mp2.h"
+#include "i2c-amd-mp2.h"
 
-#define DRIVER_NAME	"pcie_mp2_amd"
-#define DRIVER_DESC	"AMD(R) PCI-E MP2 Communication Driver"
+#define DRIVER_NAME	"i2c_amd_mp2"
+#define DRIVER_DESC	"AMD(R) PCI-E MP2 I2C Controller Driver"
 #define DRIVER_VER	"1.0"
 
 #define write64 _write64
@@ -70,7 +70,6 @@ int amd_mp2_connect(struct amd_i2c_common *i2c_common, bool enable)
 
 	return amd_mp2_cmd(privdata, i2c_cmd_base);
 }
-EXPORT_SYMBOL_GPL(amd_mp2_connect);
 
 static void amd_mp2_cmd_rw_fill(struct amd_i2c_common *i2c_common,
 				union i2c_cmd_base *i2c_cmd_base,
@@ -149,7 +148,6 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common)
 
 	return amd_mp2_cmd(privdata, i2c_cmd_base);
 }
-EXPORT_SYMBOL_GPL(amd_mp2_read);
 
 int amd_mp2_write(struct amd_i2c_common *i2c_common)
 {
@@ -179,7 +177,6 @@ int amd_mp2_write(struct amd_i2c_common *i2c_common)
 
 	return amd_mp2_cmd(privdata, i2c_cmd_base);
 }
-EXPORT_SYMBOL_GPL(amd_mp2_write);
 
 static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 {
@@ -233,7 +230,7 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 				"invalid i2c status after read (%d)!\n", sts);
 		}
 
-		i2c_common->ops->read_complete(&i2c_common->eventval);
+		i2c_amd_read_completion(&i2c_common->eventval);
 		break;
 	case i2c_write:
 		if (sts == i2c_writecomplete_event)
@@ -244,25 +241,27 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after write (%d)!\n", sts);
 
-		i2c_common->ops->write_complete(&i2c_common->eventval);
+		i2c_amd_write_completion(&i2c_common->eventval);
 		break;
 	case i2c_enable:
 		if (sts == i2c_busenable_failed)
 			dev_err(ndev_dev(privdata), "i2c bus enable failed!\n");
 		else if (sts != i2c_busenable_complete)
 			dev_err(ndev_dev(privdata),
-				"invalid i2c status after bus enable (%d)!\n", sts);
+				"invalid i2c status after bus enable (%d)!\n",
+				sts);
 
-		i2c_common->ops->connect_complete(&i2c_common->eventval);
+		i2c_amd_connect_completion(&i2c_common->eventval);
 		break;
 	case i2c_disable:
 		if (sts == i2c_busdisable_failed)
 			dev_err(ndev_dev(privdata), "i2c bus disable failed!\n");
 		else if (sts != i2c_busdisable_complete)
 			dev_err(ndev_dev(privdata),
-				"invalid i2c status after bus disable (%d)!\n", sts);
+				"invalid i2c status after bus disable (%d)!\n",
+				sts);
 
-		i2c_common->ops->connect_complete(&i2c_common->eventval);
+		i2c_amd_connect_completion(&i2c_common->eventval);
 		break;
 	default:
 		break;
@@ -330,7 +329,6 @@ int amd_i2c_register_cb(struct amd_mp2_dev *privdata,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(amd_i2c_register_cb);
 
 int amd_i2c_unregister_cb(struct amd_mp2_dev *privdata,
 			  struct amd_i2c_common *i2c_common)
@@ -340,7 +338,6 @@ int amd_i2c_unregister_cb(struct amd_mp2_dev *privdata,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(amd_i2c_unregister_cb);
 
 #ifdef CONFIG_DEBUG_FS
 static const struct file_operations amd_mp2_debugfs_info;
@@ -374,7 +371,7 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 			 "\tMP2 C2P Message Register Dump:\n\n");
 
 	for (i = 0; i < 10; i++) {
-		v32 = readl(privdata->mmio + AMD_C2P_MSG0 + i*4);
+		v32 = readl(privdata->mmio + AMD_C2P_MSG0 + i * 4);
 		off += scnprintf(buf + off, buf_size - off,
 				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i, v32);
 	}
@@ -383,9 +380,9 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 			"\n\tMP2 P2C Message Register Dump:\n\n");
 
 	for (i = 0; i < 2; i++) {
-		v32 = readl(privdata->mmio + AMD_P2C_MSG1 + i*4);
+		v32 = readl(privdata->mmio + AMD_P2C_MSG1 + i * 4);
 		off += scnprintf(buf + off, buf_size - off,
-				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i+1, v32);
+				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i + 1, v32);
 	}
 
 	v32 = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
@@ -503,10 +500,8 @@ static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
 		 (int)pci_dev->revision);
 
 	privdata = devm_kzalloc(&pci_dev->dev, sizeof(*privdata), GFP_KERNEL);
-	if (!privdata) {
-		dev_err(&pci_dev->dev, "Memory allocation Failed\n");
+	if (!privdata)
 		return -ENOMEM;
-	}
 
 	privdata->pci_dev = pci_dev;
 
@@ -529,8 +524,9 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 			amd_i2c_unregister_cb(privdata,
 					      privdata->plat_common[bus_id]);
 
-	if (privdata->debugfs_dir)
-		debugfs_remove_recursive(privdata->debugfs_dir);
+#ifdef CONFIG_DEBUG_FS
+	debugfs_remove_recursive(privdata->debugfs_dir);
+#endif /* CONFIG_DEBUG_FS */
 
 	amd_mp2_clear_reg(privdata);
 
@@ -622,28 +618,36 @@ struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate)
 	pci_dev = to_pci_dev(dev);
 	return (struct amd_mp2_dev *)pci_get_drvdata(pci_dev);
 }
-EXPORT_SYMBOL_GPL(amd_mp2_find_device);
 
-static int __init amd_mp2_pci_driver_init(void)
+static int __init amd_mp2_drv_init(void)
 {
+	int rc;
+
 #ifdef CONFIG_DEBUG_FS
 	debugfs_root_dir = debugfs_create_dir(KBUILD_MODNAME, NULL);
 #endif /* CONFIG_DEBUG_FS */
-	return pci_register_driver(&amd_mp2_pci_driver);
-}
-module_init(amd_mp2_pci_driver_init);
 
-static void __exit amd_mp2_pci_driver_exit(void)
+	rc = pci_register_driver(&amd_mp2_pci_driver);
+	if (rc)
+		return rc;
+	return i2c_amd_register_driver();
+}
+module_init(amd_mp2_drv_init);
+
+static void __exit amd_mp2_drv_exit(void)
 {
+	i2c_amd_unregister_driver();
 	pci_unregister_driver(&amd_mp2_pci_driver);
+
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(debugfs_root_dir);
 #endif /* CONFIG_DEBUG_FS */
 }
-module_exit(amd_mp2_pci_driver_exit);
+module_exit(amd_mp2_drv_exit);
 
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_VERSION(DRIVER_VER);
 MODULE_AUTHOR("Shyam Sundar S K <Shyam-sundar.S-k@amd.com>");
+MODULE_AUTHOR("Nehal Shah <nehal-bakulchandra.shah@amd.com>");
 MODULE_AUTHOR("Elie Morisse <syniurge@gmail.com>");
 MODULE_LICENSE("Dual BSD/GPL");

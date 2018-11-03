@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * AMD MP2 I2C Platform Driver
+ * AMD MP2 Platform Driver for ACPI namespace lookups
  *
  * Authors: Nehal Bakulchandra Shah <Nehal-bakulchandra.shah@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -15,8 +15,7 @@
 #include <linux/acpi.h>
 #include <linux/delay.h>
 
-#include "i2c-amd-pci-mp2.h"
-#define DRIVER_NAME "i2c-amd-plat-mp2"
+#include "i2c-amd-mp2.h"
 
 #define AMD_MP2_I2C_MAX_RW_LENGTH ((1 << 12) - 1)
 #define AMD_I2C_TIMEOUT (msecs_to_jiffies(250))
@@ -47,7 +46,7 @@ static const struct i2c_adapter_quirks amd_i2c_dev_quirks = {
 #define amd_i2c_dev_common(__common) \
 	container_of(__common, struct amd_i2c_dev, i2c_common)
 
-static int i2c_amd_read_completion(union i2c_event *event)
+void i2c_amd_read_completion(union i2c_event *event)
 {
 	struct amd_i2c_common *i2c_common = event_amd_i2c_common(event);
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
@@ -58,43 +57,29 @@ static int i2c_amd_read_completion(union i2c_event *event)
 			i2c_common->rw_cfg.buf);
 
 	complete(&i2c_dev->msg_complete);
-
-	return 0;
 }
 
-static int i2c_amd_write_completion(union i2c_event *event)
+void i2c_amd_write_completion(union i2c_event *event)
 {
 	struct amd_i2c_common *i2c_common = event_amd_i2c_common(event);
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
 	complete(&i2c_dev->msg_complete);
-
-	return 0;
 }
 
-static int i2c_amd_connect_completion(union i2c_event *event)
+void i2c_amd_connect_completion(union i2c_event *event)
 {
 	struct amd_i2c_common *i2c_common = event_amd_i2c_common(event);
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
 	complete(&i2c_dev->msg_complete);
-
-	return 0;
 }
-
-static const struct amd_i2c_pci_ops data_handler = {
-	.read_complete = i2c_amd_read_completion,
-	.write_complete = i2c_amd_write_completion,
-	.connect_complete = i2c_amd_connect_completion,
-};
 
 static int i2c_amd_pci_configure(struct amd_i2c_dev *i2c_dev)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 
 	amd_i2c_register_cb(i2c_common->mp2_dev, i2c_common);
-	i2c_common->ops = &data_handler;
-
 	return 0;
 }
 
@@ -266,7 +251,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
 	struct acpi_device *adev;
 	struct pci_dev *parent_candidate = NULL;
-	struct amd_mp2_dev* mp2_dev;
+	struct amd_mp2_dev *mp2_dev;
 
 	i2c_dev = devm_kzalloc(dev, sizeof(*i2c_dev), GFP_KERNEL);
 	if (!i2c_dev)
@@ -371,9 +356,12 @@ static struct platform_driver amd_i2c_plat_driver = {
 	},
 };
 
-module_platform_driver(amd_i2c_plat_driver);
+int i2c_amd_register_driver(void)
+{
+	return platform_driver_register(&amd_i2c_plat_driver);
+}
 
-MODULE_DESCRIPTION("AMD MP2 I2C Platform Driver");
-MODULE_AUTHOR("Nehal Shah <nehal-bakulchandra.shah@amd.com>");
-MODULE_AUTHOR("Elie Morisse <syniurge@gmail.com>");
-MODULE_LICENSE("Dual BSD/GPL");
+void i2c_amd_unregister_driver(void)
+{
+	platform_driver_unregister(&amd_i2c_plat_driver);
+}
