@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * AMD MP2 platform driver for ACPI namespace lookups
+ * AMD MP2 platform driver
+ *
+ * Setup the I2C adapters enumerated in the ACPI namespace.
+ * MP2 controllers have 2 separate buses, i.e up to 2 I2C adapters.
  *
  * Authors: Nehal Bakulchandra Shah <Nehal-bakulchandra.shah@amd.com>
  *          Elie Morisse <syniurge@gmail.com>
@@ -348,21 +351,21 @@ static const struct acpi_device_id i2c_amd_acpi_match[] = {
 };
 MODULE_DEVICE_TABLE(acpi, i2c_amd_acpi_match);
 
-static struct platform_driver amd_i2c_plat_driver = {
+static struct platform_driver i2c_amd_plat_driver = {
 	.probe = i2c_amd_probe,
 	.remove = i2c_amd_remove,
 	.driver = {
-		.name = "i2c_amd_plat_mp2",
+		.name = "i2c_amd_mp2",
 		.acpi_match_table = ACPI_PTR(i2c_amd_acpi_match),
 	},
 };
 
 int i2c_amd_register_driver(void)
 {
-	return platform_driver_register(&amd_i2c_plat_driver);
+	return platform_driver_register(&i2c_amd_plat_driver);
 }
 
 void i2c_amd_unregister_driver(void)
 {
-	platform_driver_unregister(&amd_i2c_plat_driver);
+	platform_driver_unregister(&i2c_amd_plat_driver);
 }

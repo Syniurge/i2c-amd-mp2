@@ -1,6 +1,5 @@
 config I2C_AMD_MP2_PCI
 	tristate "AMD MP2 PCIe I2C adapter"
-	select I2C_AMD_MP2_PCI
 	depends on PCI && ACPI
 	help
 	  If you say yes to this option, support will be included for the AMD

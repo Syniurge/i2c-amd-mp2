@@ -151,9 +151,9 @@ struct i2c_rw_config {
 
 /**
  * struct amd_i2c_common - per bus/i2c adapter context, shared
- *		between the pci and the platform driver
+ *	between the pci and the platform driver
  * @eventval: MP2 event value set by the IRQ handler to be processed
- *		by the worker
+ *	      by the worker
  * @ops: platdrv hooks
  * @rw_cfg: settings for reads/writes
  * @work: delayed worker struct
@@ -176,7 +176,7 @@ struct amd_i2c_common {
  * struct amd_mp2_dev - per PCI device context
  * @pci_dev: PCI driver node
  * @plat_common: MP2 devices may have up to two busses,
- *		each bus corresponding to an i2c adapter
+ *		 each bus corresponding to an i2c adapter
  * @mmio: iommapped registers
  * @lock: interrupt spinlock
  * @c2p_lock: controls access to the C2P mailbox shared between
