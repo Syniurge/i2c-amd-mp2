@@ -64,11 +64,6 @@ static int amd_mp2_cmd(struct amd_mp2_dev *privdata,
 {
 	void __iomem *reg;
 
-	if (i2c_cmd_base.s.bus_id > 1) {
-		dev_err(ndev_dev(privdata), "%s Invalid bus id\n", __func__);
-		return -EINVAL;
-	}
-
 	reg = privdata->mmio + ((i2c_cmd_base.s.bus_id == 1) ?
 				AMD_C2P_MSG1 : AMD_C2P_MSG0);
 	writel(i2c_cmd_base.ul, reg);
@@ -337,9 +332,10 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 	return ret;
 }
 
-int amd_i2c_register_cb(struct amd_mp2_dev *privdata,
-			struct amd_i2c_common *i2c_common)
+int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 {
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
 	if (i2c_common->bus_id > 1)
 		return -EINVAL;
 	privdata->plat_common[i2c_common->bus_id] = i2c_common;
@@ -349,9 +345,10 @@ int amd_i2c_register_cb(struct amd_mp2_dev *privdata,
 	return 0;
 }
 
-int amd_i2c_unregister_cb(struct amd_mp2_dev *privdata,
-			  struct amd_i2c_common *i2c_common)
+int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common)
 {
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
 	cancel_delayed_work_sync(&i2c_common->work);
 	privdata->plat_common[i2c_common->bus_id] = NULL;
 
@@ -398,10 +395,10 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 	off += scnprintf(buf + off, buf_size - off,
 			"\n\tMP2 P2C Message Register Dump:\n\n");
 
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < 3; i++) {
 		v32 = readl(privdata->mmio + AMD_P2C_MSG1 + i * 4);
 		off += scnprintf(buf + off, buf_size - off,
-				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i + 1, v32);
+				 "AMD_P2C_MSG%d -\t\t\t%#06x\n", i + 1, v32);
 	}
 
 	v32 = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
@@ -540,8 +537,7 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 
 	for (bus_id = 0; bus_id < 2; bus_id++)
 		if (privdata->plat_common[bus_id])
-			amd_i2c_unregister_cb(privdata,
-					      privdata->plat_common[bus_id]);
+			amd_mp2_register_cb(privdata->plat_common[bus_id]);
 
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(privdata->debugfs_dir);

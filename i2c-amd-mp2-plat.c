@@ -82,7 +82,7 @@ static int i2c_amd_pci_configure(struct amd_i2c_dev *i2c_dev)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 
-	amd_i2c_register_cb(i2c_common->mp2_dev, i2c_common);
+	amd_mp2_register_cb(i2c_common);
 	return 0;
 }
 
@@ -339,7 +339,7 @@ static int i2c_amd_remove(struct platform_device *pdev)
 
 	i2c_amd_pci_xconnect(i2c_dev, false);
 
-	amd_i2c_unregister_cb(i2c_common->mp2_dev, i2c_common);
+	amd_mp2_register_cb(i2c_common);
 	i2c_del_adapter(&i2c_dev->adapter);
 
 	return 0;
