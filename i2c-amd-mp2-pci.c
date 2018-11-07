@@ -332,6 +332,14 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 	return ret;
 }
 
+void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
+{
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
+	if (amd_mp2_irq_isr(2, privdata) != IRQ_HANDLED)
+		amd_mp2_c2p_mutex_unlock(i2c_common);
+}
+
 int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
