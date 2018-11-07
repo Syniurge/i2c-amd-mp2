@@ -198,12 +198,11 @@ struct amd_mp2_dev {
 
 /* PCIe communication driver */
 
-void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common);
-void amd_mp2_c2p_mutex_unlock(struct amd_i2c_common *i2c_common);
-
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
 int amd_mp2_write(struct amd_i2c_common *i2c_common);
 int amd_mp2_connect(struct amd_i2c_common *i2c_common, bool enable);
+
+void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common);
 
 int amd_mp2_register_cb(struct amd_i2c_common *i2c_common);
 int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common);

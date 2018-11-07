@@ -36,7 +36,7 @@ static inline u64 _read64(void __iomem *mmio)
 	return low | (high << 32);
 }
 
-void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common)
+static void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
@@ -45,7 +45,7 @@ void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common)
 	privdata->c2p_lock_busid = i2c_common->bus_id;
 }
 
-void amd_mp2_c2p_mutex_unlock(struct amd_i2c_common *i2c_common)
+static void amd_mp2_c2p_mutex_unlock(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
@@ -330,6 +330,16 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 
 	raw_spin_unlock_irqrestore(&privdata->lock, flags);
 	return ret;
+}
+
+void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
+{
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
+	if (amd_mp2_irq_isr(2, privdata) != IRQ_HANDLED) {
+		writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
+		amd_mp2_c2p_mutex_unlock(i2c_common);
+	}
 }
 
 int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
