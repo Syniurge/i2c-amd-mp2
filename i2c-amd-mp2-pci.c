@@ -454,7 +454,7 @@ static void amd_mp2_clear_reg(struct amd_mp2_dev *privdata)
 	for (reg = AMD_C2P_MSG0; reg <= AMD_C2P_MSG9; reg += 4)
 		writel(0, privdata->mmio + reg);
 
-	for (reg = AMD_P2C_MSG0; reg <= AMD_P2C_MSG2; reg += 4)
+	for (reg = AMD_P2C_MSG1; reg <= AMD_P2C_MSG2; reg += 4)
 		writel(0, privdata->mmio + reg);
 }
 
