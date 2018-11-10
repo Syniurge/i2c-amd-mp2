@@ -9,6 +9,7 @@
 #ifndef I2C_AMD_PCI_MP2_H
 #define I2C_AMD_PCI_MP2_H
 
+#include <linux/i2c.h>
 #include <linux/pci.h>
 
 #define PCI_DEVICE_ID_AMD_MP2	0x15E6
@@ -134,42 +135,28 @@ union i2c_event {
 };
 
 /**
- * struct i2c_rw_config - i2c read/write settings
- * @slave_addr: slave address
- * @length: message length
- * @buf: buffer address
- * @dma_addr: if length > 32, holds the DMA buffer address
- * @dma_direction: if length > 32, is either FROM or TO device
- */
-struct i2c_rw_config {
-	u16 slave_addr;
-	u32 length;
-	u32 *buf;
-	dma_addr_t dma_addr;
-	enum dma_data_direction dma_direction;
-};
-
-/**
  * struct amd_i2c_common - per bus/i2c adapter context, shared
  *	between the pci and the platform driver
  * @eventval: MP2 event value set by the IRQ handler to be processed
  *	      by the worker
- * @ops: platdrv hooks
- * @rw_cfg: settings for reads/writes
+ * @msg: i2c message
  * @work: delayed worker struct
- * @reqcmd: i2c command type requested by platdrv
- * @requested: true if the interrupt answered a request from platdrv
+ * @reqcmd: requested i2c command type
  * @bus_id: bus index
  * @i2c_speed: i2c bus speed determined by the slowest slave
+ * @dma_addr: if length > 32, holds the DMA buffer address
+ * @dma_direction: if length > 32, is either FROM or TO device
  */
 struct amd_i2c_common {
 	union i2c_event eventval;
 	struct amd_mp2_dev *mp2_dev;
-	struct i2c_rw_config rw_cfg;
+	struct i2c_msg *msg;
 	struct delayed_work work;
 	enum i2c_cmd reqcmd;
 	u8 bus_id;
 	enum speed_enum i2c_speed;
+	u8 *dma_buf;
+	dma_addr_t dma_addr;
 };
 
 /**
@@ -211,9 +198,7 @@ struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate);
 
 /* Platform driver */
 
-void i2c_amd_read_completion(union i2c_event *event);
-void i2c_amd_write_completion(union i2c_event *event);
-void i2c_amd_connect_completion(union i2c_event *event);
+void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common);
 
 int i2c_amd_register_driver(void);
 void i2c_amd_unregister_driver(void);
@@ -223,7 +208,5 @@ void i2c_amd_unregister_driver(void);
 #define ndev_dev(ndev) (&ndev_pdev(ndev)->dev)
 #define work_amd_i2c_common(__work) \
 	container_of(__work, struct amd_i2c_common, work.work)
-#define event_amd_i2c_common(__event) \
-	container_of(__event, struct amd_i2c_common, eventval)
 
 #endif

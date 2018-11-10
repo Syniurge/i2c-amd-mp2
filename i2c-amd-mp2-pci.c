@@ -98,41 +98,61 @@ static void amd_mp2_cmd_rw_fill(struct amd_i2c_common *i2c_common,
 	i2c_cmd_base->s.i2c_cmd = reqcmd;
 	i2c_cmd_base->s.bus_id = i2c_common->bus_id;
 	i2c_cmd_base->s.i2c_speed = i2c_common->i2c_speed;
-	i2c_cmd_base->s.slave_addr = i2c_common->rw_cfg.slave_addr;
-	i2c_cmd_base->s.length = i2c_common->rw_cfg.length;
+	i2c_cmd_base->s.slave_addr = i2c_common->msg->addr;
+	i2c_cmd_base->s.length = i2c_common->msg->len;
 }
 
 static int amd_mp2_dma_map(struct amd_mp2_dev *privdata,
-			   struct amd_i2c_common *i2c_common,
-			   bool is_write)
+			   struct amd_i2c_common *i2c_common)
 {
-	enum dma_data_direction dma_direction = is_write ?
-			DMA_TO_DEVICE : DMA_FROM_DEVICE;
+	enum dma_data_direction dma_direction =
+			i2c_common->msg->flags & I2C_M_RD ?
+			DMA_FROM_DEVICE : DMA_TO_DEVICE;
 
-	i2c_common->rw_cfg.dma_addr = dma_map_single(&privdata->pci_dev->dev,
-						     i2c_common->rw_cfg.buf,
-						     i2c_common->rw_cfg.length,
-						     dma_direction);
-	i2c_common->rw_cfg.dma_direction = dma_direction;
+	i2c_common->dma_buf = i2c_get_dma_safe_msg_buf(i2c_common->msg, 0);
+	i2c_common->dma_addr = dma_map_single(&privdata->pci_dev->dev,
+					      i2c_common->dma_buf,
+					      i2c_common->msg->len,
+					      dma_direction);
 
 	if (dma_mapping_error(&privdata->pci_dev->dev,
-			      i2c_common->rw_cfg.dma_addr)) {
+			      i2c_common->dma_addr)) {
 		dev_err(ndev_dev(privdata),
 			"Error while mapping dma buffer %p\n",
-			i2c_common->rw_cfg.buf);
+			i2c_common->dma_buf);
 		return -EIO;
 	}
 
 	return 0;
 }
 
+#ifndef i2c_put_dma_safe_msg_buf
+// DKMS only, for kernels older than 4.19
+void i2c_put_dma_safe_msg_buf(u8 *buf, struct i2c_msg *msg, bool xferred)
+{
+	if (!buf || buf == msg->buf)
+		return;
+
+	if (xferred && msg->flags & I2C_M_RD)
+		memcpy(msg->buf, buf, msg->len);
+
+	kfree(buf);
+}
+#endif
+
 static void amd_mp2_dma_unmap(struct amd_mp2_dev *privdata,
 			      struct amd_i2c_common *i2c_common)
 {
+	enum dma_data_direction dma_direction =
+			i2c_common->msg->flags & I2C_M_RD ?
+			DMA_FROM_DEVICE : DMA_TO_DEVICE;
+
 	dma_unmap_single(&privdata->pci_dev->dev,
-			 i2c_common->rw_cfg.dma_addr,
-			 i2c_common->rw_cfg.length,
-			 i2c_common->rw_cfg.dma_direction);
+			 i2c_common->dma_addr,
+			 i2c_common->msg->len,
+			 dma_direction);
+
+	i2c_put_dma_safe_msg_buf(i2c_common->dma_buf, i2c_common->msg, true);
 }
 
 int amd_mp2_read(struct amd_i2c_common *i2c_common)
@@ -141,24 +161,18 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common)
 	union i2c_cmd_base i2c_cmd_base;
 
 	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
-		i2c_common->rw_cfg.slave_addr, i2c_common->bus_id);
+		i2c_common->msg->addr, i2c_common->bus_id);
 
 	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, i2c_read);
 	amd_mp2_c2p_mutex_lock(i2c_common);
 
-	if (!i2c_common->rw_cfg.buf) {
-		dev_err(ndev_dev(privdata), "%s no mem for buf received\n",
-			__func__);
-		return -ENOMEM;
-	}
-
-	if (i2c_common->rw_cfg.length <= 32) {
+	if (i2c_common->msg->len <= 32) {
 		i2c_cmd_base.s.mem_type = use_c2pmsg;
 	} else {
 		i2c_cmd_base.s.mem_type = use_dram;
-		if (amd_mp2_dma_map(privdata, i2c_common, false))
+		if (amd_mp2_dma_map(privdata, i2c_common))
 			return -EIO;
-		write64((u64)i2c_common->rw_cfg.dma_addr,
+		write64((u64)i2c_common->dma_addr,
 			privdata->mmio + AMD_C2P_MSG2);
 	}
 
@@ -171,21 +185,21 @@ int amd_mp2_write(struct amd_i2c_common *i2c_common)
 	union i2c_cmd_base i2c_cmd_base;
 
 	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
-		i2c_common->rw_cfg.slave_addr, i2c_common->bus_id);
+		i2c_common->msg->addr, i2c_common->bus_id);
 
 	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, i2c_write);
 	amd_mp2_c2p_mutex_lock(i2c_common);
 
-	if (i2c_common->rw_cfg.length <= 32) {
+	if (i2c_common->msg->len <= 32) {
 		i2c_cmd_base.s.mem_type = use_c2pmsg;
 		memcpy_toio(privdata->mmio + AMD_C2P_MSG2,
-			    i2c_common->rw_cfg.buf,
-			    i2c_common->rw_cfg.length);
+			    i2c_common->msg->buf,
+			    i2c_common->msg->len);
 	} else {
 		i2c_cmd_base.s.mem_type = use_dram;
-		if (amd_mp2_dma_map(privdata, i2c_common, true))
+		if (amd_mp2_dma_map(privdata, i2c_common))
 			return -EIO;
-		write64((u64)i2c_common->rw_cfg.dma_addr,
+		write64((u64)i2c_common->dma_addr,
 			privdata->mmio + AMD_C2P_MSG2);
 	}
 
@@ -198,14 +212,14 @@ static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 	int len = i2c_common->eventval.r.length;
 	u32 slave_addr = i2c_common->eventval.r.slave_addr;
 
-	if (len != i2c_common->rw_cfg.length)
+	if (len != i2c_common->msg->len)
 		dev_err(ndev_dev(privdata),
 			"length %d in event doesn't match buffer length %d!\n",
-			len, i2c_common->rw_cfg.length);
-	if (slave_addr != i2c_common->rw_cfg.slave_addr)
+			len, i2c_common->msg->len);
+	if (slave_addr != i2c_common->msg->addr)
 		dev_err(ndev_dev(privdata),
 			"unexpected slave address %x (expected: %x)!\n",
-			slave_addr, i2c_common->rw_cfg.slave_addr);
+			slave_addr, i2c_common->msg->addr);
 }
 
 static void amd_mp2_pci_do_work(struct work_struct *work)
@@ -218,7 +232,7 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 
 	if ((i2c_common->reqcmd == i2c_read ||
 	     i2c_common->reqcmd == i2c_write) &&
-	    i2c_common->rw_cfg.length > 32)
+	    i2c_common->msg->len > 32)
 		amd_mp2_dma_unmap(privdata, i2c_common);
 
 	if (res != command_success) {
@@ -226,6 +240,7 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata), "i2c command failed!\n");
 		else
 			dev_err(ndev_dev(privdata), "invalid response to i2c command!\n");
+		i2c_amd_msg_completion(i2c_common);
 		return;
 	}
 
@@ -234,17 +249,15 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 		if (sts == i2c_readcomplete_event) {
 			amd_mp2_pci_check_rw_event(i2c_common);
 			if (len <= 32)
-				memcpy_fromio(i2c_common->rw_cfg.buf,
+				memcpy_fromio(i2c_common->msg->buf,
 					      privdata->mmio + AMD_C2P_MSG2,
-					      i2c_common->rw_cfg.length);
+					      i2c_common->msg->len);
 		} else if (sts == i2c_readfail_event) {
 			dev_err(ndev_dev(privdata), "i2c read failed!\n");
 		} else {
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after read (%d)!\n", sts);
 		}
-
-		i2c_amd_read_completion(&i2c_common->eventval);
 		break;
 	case i2c_write:
 		if (sts == i2c_writecomplete_event)
@@ -254,8 +267,6 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 		else
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after write (%d)!\n", sts);
-
-		i2c_amd_write_completion(&i2c_common->eventval);
 		break;
 	case i2c_enable:
 		if (sts == i2c_busenable_failed)
@@ -264,8 +275,6 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after bus enable (%d)!\n",
 				sts);
-
-		i2c_amd_connect_completion(&i2c_common->eventval);
 		break;
 	case i2c_disable:
 		if (sts == i2c_busdisable_failed)
@@ -274,12 +283,12 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after bus disable (%d)!\n",
 				sts);
-
-		i2c_amd_connect_completion(&i2c_common->eventval);
 		break;
 	default:
 		break;
 	}
+
+	i2c_amd_msg_completion(i2c_common);
 }
 
 static void amd_mp2_pci_work(struct work_struct *work)
@@ -336,10 +345,8 @@ void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
-	if (amd_mp2_irq_isr(2, privdata) != IRQ_HANDLED) {
-		writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
-		amd_mp2_c2p_mutex_unlock(i2c_common);
-	}
+	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
+	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
 
 int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)

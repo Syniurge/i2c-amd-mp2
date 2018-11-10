@@ -13,7 +13,6 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/slab.h>
-#include <linux/i2c.h>
 #include <linux/platform_device.h>
 #include <linux/acpi.h>
 #include <linux/delay.h>
@@ -25,7 +24,7 @@
 
 /**
  * struct amd_i2c_dev - MP2 bus/i2c adapter context
- * @i2c_common: shared context with the MP2 pci driver
+ * @i2c_common: shared context with the MP2 PCI driver
  * @pdev: platform driver node
  * @adapter: i2c adapter
  * @xfer_lock: xfer lock
@@ -37,53 +36,23 @@ struct amd_i2c_dev {
 	struct i2c_adapter adapter;
 	struct mutex xfer_lock;
 	struct completion msg_complete;
-	struct i2c_msg *msg_buf;
 	bool is_configured;
-};
-
-static const struct i2c_adapter_quirks amd_i2c_dev_quirks = {
-	.max_read_len = AMD_MP2_I2C_MAX_RW_LENGTH,
-	.max_write_len = AMD_MP2_I2C_MAX_RW_LENGTH,
 };
 
 #define amd_i2c_dev_common(__common) \
 	container_of(__common, struct amd_i2c_dev, i2c_common)
 
-void i2c_amd_read_completion(union i2c_event *event)
+void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common)
 {
-	struct amd_i2c_common *i2c_common = event_amd_i2c_common(event);
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
+	union i2c_event *event = &i2c_common->eventval;
 
 	if (event->r.status == i2c_readcomplete_event)
 		dev_dbg(&i2c_dev->pdev->dev, "%s readdata:%*ph\n",
 			__func__, event->r.length,
-			i2c_common->rw_cfg.buf);
+			i2c_common->msg->buf);
 
 	complete(&i2c_dev->msg_complete);
-}
-
-void i2c_amd_write_completion(union i2c_event *event)
-{
-	struct amd_i2c_common *i2c_common = event_amd_i2c_common(event);
-	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
-
-	complete(&i2c_dev->msg_complete);
-}
-
-void i2c_amd_connect_completion(union i2c_event *event)
-{
-	struct amd_i2c_common *i2c_common = event_amd_i2c_common(event);
-	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
-
-	complete(&i2c_dev->msg_complete);
-}
-
-static int i2c_amd_pci_configure(struct amd_i2c_dev *i2c_dev)
-{
-	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
-
-	amd_mp2_register_cb(i2c_common);
-	return 0;
 }
 
 static int i2c_amd_pci_xconnect(struct amd_i2c_dev *i2c_dev, bool enable)
@@ -114,21 +83,17 @@ static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 
 	reinit_completion(&i2c_dev->msg_complete);
 
-	i2c_common->rw_cfg.slave_addr = pmsg->addr;
-	i2c_common->rw_cfg.buf = (u32 *)pmsg->buf;
-	i2c_common->rw_cfg.length = pmsg->len;
-	i2c_dev->msg_buf = pmsg;
+	i2c_common->msg = pmsg;
 
 	if (is_read)
 		amd_mp2_read(i2c_common);
 	else
 		amd_mp2_write(i2c_common);
 
-	timeout = wait_for_completion_timeout
-		(&i2c_dev->msg_complete, AMD_I2C_TIMEOUT);
+	timeout = wait_for_completion_timeout(&i2c_dev->msg_complete,
+					      AMD_I2C_TIMEOUT);
 	if (timeout == 0) {
-		dev_err(&i2c_dev->pdev->dev,
-			"i2c %s timed out\n",
+		dev_err(&i2c_dev->pdev->dev, "i2c %s timed out\n",
 			is_read ? "read" : "write");
 		amd_mp2_rw_timeout(i2c_common);
 		return -ETIMEDOUT;
@@ -146,8 +111,8 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 
 	mutex_lock(&dev->xfer_lock);
 
-	if (dev->is_configured == 0) {
-		i2c_amd_pci_configure(dev);
+	if (unlikely(!dev->is_configured)) {
+		amd_mp2_register_cb(&dev->i2c_common);
 		i2c_amd_pci_xconnect(dev, true);
 		dev->is_configured = 1;
 	}
@@ -221,7 +186,9 @@ static struct device *i2c_amd_acpi_get_first_phys_node(struct acpi_device *adev)
 }
 
 /*
- * Take the first PCI device listed by the _DEP method as a hint
+ * Take the first PCI device listed by the _DEP method as a hint.
+ * On Lenovo Ideapad/Yoga _DEP appears to be the only available hint at which
+ * PCI device an AMDI0011 ACPI device corresponds to.
  */
 static struct pci_dev *i2c_amd_find_pci_parent_hint(struct acpi_device *adev)
 {
@@ -247,77 +214,70 @@ static struct pci_dev *i2c_amd_find_pci_parent_hint(struct acpi_device *adev)
 	return to_pci_dev(phys_dev);
 }
 
+static const struct i2c_adapter_quirks amd_i2c_dev_quirks = {
+	.max_read_len = AMD_MP2_I2C_MAX_RW_LENGTH,
+	.max_write_len = AMD_MP2_I2C_MAX_RW_LENGTH,
+};
+
 static int i2c_amd_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct amd_i2c_dev *i2c_dev;
-	struct device *dev = &pdev->dev;
 	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
 	struct acpi_device *adev;
 	struct pci_dev *parent_candidate = NULL;
 	struct amd_mp2_dev *mp2_dev;
+	const char *uid;
 
-	i2c_dev = devm_kzalloc(dev, sizeof(*i2c_dev), GFP_KERNEL);
+	if (acpi_bus_get_device(handle, &adev))
+		return -ENODEV;
+
+	parent_candidate = i2c_amd_find_pci_parent_hint(adev);
+	mp2_dev = amd_mp2_find_device(parent_candidate);
+	if (!mp2_dev && parent_candidate)
+		/* If the hint pointed at a PCI device which isn't a MP2, go
+		 * for the first MP2 device registered in the PCI driver */
+		mp2_dev = amd_mp2_find_device(NULL);
+	if (!mp2_dev)
+		/* The corresponding MP2 PCI device might get probed later */
+		return -EPROBE_DEFER;
+
+	i2c_dev = devm_kzalloc(&pdev->dev, sizeof(*i2c_dev), GFP_KERNEL);
 	if (!i2c_dev)
 		return -ENOMEM;
 
+	i2c_dev->i2c_common.mp2_dev = mp2_dev;
 	i2c_dev->pdev = pdev;
+	platform_set_drvdata(pdev, i2c_dev);
 
-	if (!acpi_bus_get_device(handle, &adev)) {
-		const char *uid = adev->pnp.unique_id;
-
-		if (!uid) {
-			dev_err(&pdev->dev, "missing UID/bus id!\n");
-			return -EINVAL;
-		}
-
-		if (strcmp(uid, "0") == 0) {
-			i2c_dev->i2c_common.bus_id = 0;
-		} else if (strcmp(uid, "1") == 0) {
-			i2c_dev->i2c_common.bus_id = 1;
-		} else {
-			dev_err(&pdev->dev,
-				"incorrect UID/bus id \"%s\"!\n", uid);
-			return -EINVAL;
-		}
-
-		dev_dbg(&pdev->dev, "bus id is %u\n",
-			i2c_dev->i2c_common.bus_id);
-
-		i2c_dev->i2c_common.i2c_speed = i2c_amd_get_bus_speed(pdev);
-	} else {
-		i2c_dev->i2c_common.i2c_speed = speed400k;
+	uid = adev->pnp.unique_id;
+	if (!uid) {
+		dev_err(&pdev->dev, "missing UID/bus id!\n");
+		return -EINVAL;
 	}
+
+	if (strcmp(uid, "0") == 0) {
+		i2c_dev->i2c_common.bus_id = 0;
+	} else if (strcmp(uid, "1") == 0) {
+		i2c_dev->i2c_common.bus_id = 1;
+	} else {
+		dev_err(&pdev->dev, "incorrect UID/bus id \"%s\"!\n", uid);
+		return -EINVAL;
+	}
+	dev_dbg(&pdev->dev, "bus id is %u\n", i2c_dev->i2c_common.bus_id);
+
+	i2c_dev->i2c_common.i2c_speed = i2c_amd_get_bus_speed(pdev);
 
 	/* setup i2c adapter description */
 	i2c_dev->adapter.owner = THIS_MODULE;
 	i2c_dev->adapter.algo = &i2c_amd_algorithm;
-	i2c_dev->adapter.timeout = AMD_I2C_TIMEOUT;
-	i2c_dev->adapter.retries = 3;
 	i2c_dev->adapter.quirks = &amd_i2c_dev_quirks;
-	i2c_dev->adapter.dev.parent = dev;
+	i2c_dev->adapter.dev.parent = &pdev->dev;
 	i2c_dev->adapter.algo_data = i2c_dev;
 	ACPI_COMPANION_SET(&i2c_dev->adapter.dev, ACPI_COMPANION(&pdev->dev));
-	i2c_dev->adapter.dev.of_node = dev->of_node;
-	snprintf(i2c_dev->adapter.name, sizeof(i2c_dev->adapter.name), "%s-%s",
-		 "i2c_dev-i2c", dev_name(pdev->dev.parent));
-
-	if (adev)
-		parent_candidate = i2c_amd_find_pci_parent_hint(adev);
-
-	mp2_dev = amd_mp2_find_device(parent_candidate);
-	if (!mp2_dev && parent_candidate)
-		mp2_dev = amd_mp2_find_device(NULL);
-	if (!mp2_dev) {
-		dev_err(&pdev->dev,
-			"%s Could not find MP2 PCI device for i2c adapter\n",
-		       __func__);
-		return -EINVAL;
-	}
-	i2c_dev->i2c_common.mp2_dev = mp2_dev;
-
-	platform_set_drvdata(pdev, i2c_dev);
-
+	i2c_dev->adapter.dev.of_node = pdev->dev.of_node;
+	snprintf(i2c_dev->adapter.name, sizeof(i2c_dev->adapter.name),
+		 "AMD MP2 i2c bus %u", i2c_dev->i2c_common.bus_id);
 	i2c_set_adapdata(&i2c_dev->adapter, i2c_dev);
 
 	init_completion(&i2c_dev->msg_complete);
