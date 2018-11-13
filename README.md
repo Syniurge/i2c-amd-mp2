@@ -17,3 +17,5 @@ This rewrite fixes all of these issues and is being submitted to the kernel.
 ```bash
     sudo ./dkms-install.sh
 ```
+
+:warning: **If your distribution is Ubuntu-based** :warning:, your kernel may ship with AMD's initial driver which is broken on some laptops and can't be overridden by a DKMS module, therefore before installing the driver you also need to install a kernel from http://kernel.ubuntu.com/~kernel-ppa/mainline/
