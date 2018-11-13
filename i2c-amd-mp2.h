@@ -162,8 +162,8 @@ struct amd_i2c_common {
 /**
  * struct amd_mp2_dev - per PCI device context
  * @pci_dev: PCI driver node
- * @plat_common: MP2 devices may have up to two busses,
- *		 each bus corresponding to an i2c adapter
+ * @busses: MP2 devices may have up to two busses,
+ *	    each bus corresponding to an i2c adapter
  * @mmio: iommapped registers
  * @lock: interrupt spinlock
  * @c2p_lock: controls access to the C2P mailbox shared between
@@ -172,7 +172,7 @@ struct amd_i2c_common {
  */
 struct amd_mp2_dev {
 	struct pci_dev *pci_dev;
-	struct amd_i2c_common *plat_common[2];
+	struct amd_i2c_common *busses[2];
 	void __iomem *mmio;
 	raw_spinlock_t lock;
 	struct mutex c2p_lock;

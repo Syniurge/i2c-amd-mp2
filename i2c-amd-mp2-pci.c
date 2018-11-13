@@ -332,13 +332,14 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 	raw_spin_lock_irqsave(&privdata->lock, flags);
 
 	for (bus_id = 0; bus_id < 2; bus_id++) {
+		i2c_common = privdata->busses[bus_id];
+		if (!i2c_common)
+			continue;
+
 		reg = privdata->mmio + ((bus_id == 0) ?
 					AMD_P2C_MSG1 : AMD_P2C_MSG2);
 		val = readl(reg);
 		if (val != 0) {
-			i2c_common = privdata->plat_common[bus_id];
-			if (!i2c_common)
-				continue;
 			i2c_common->eventval.ul = val;
 
 			writel(0, reg);
@@ -370,14 +371,14 @@ int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 	if (i2c_common->bus_id > 1)
 		return -EINVAL;
 
-	if (privdata->plat_common[i2c_common->bus_id] != NULL) {
+	if (privdata->busses[i2c_common->bus_id]) {
 		dev_err(ndev_dev(privdata),
-			"Bus already taken, incorrect MP2 <-> ACPI "
-			"device association!\n");
+			"Bus %d already taken!\n", i2c_common->bus_id);
 		return -EINVAL;
 	}
 
-	privdata->plat_common[i2c_common->bus_id] = i2c_common;
+	privdata->busses[i2c_common->bus_id] = i2c_common;
+	i2c_common->reqcmd = i2c_none;
 	INIT_DELAYED_WORK(&i2c_common->work, amd_mp2_pci_work);
 
 	return 0;
@@ -388,7 +389,7 @@ int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common)
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
 	cancel_delayed_work_sync(&i2c_common->work);
-	privdata->plat_common[i2c_common->bus_id] = NULL;
+	privdata->busses[i2c_common->bus_id] = NULL;
 
 	return 0;
 }
@@ -513,12 +514,10 @@ static int amd_mp2_pci_init(struct amd_mp2_dev *privdata,
 		rc = pci_set_dma_mask(pci_dev, DMA_BIT_MASK(32));
 		if (rc)
 			goto err_dma_mask;
-		dev_warn(ndev_dev(privdata), "Cannot DMA highmem\n");
 	}
 
-	mutex_init(&privdata->c2p_lock);
-
-	/* Try to set up intx irq */
+	/* Set up intx irq */
+	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 	raw_spin_lock_init(&privdata->lock);
 	pci_intx(pci_dev, 1);
 	rc = devm_request_irq(&pci_dev->dev, pci_dev->irq, amd_mp2_irq_isr,
@@ -550,22 +549,31 @@ static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
 	}
 
 	dev_info(&pci_dev->dev, "MP2 device found [%04x:%04x] (rev %x)\n",
-		 (int)pci_dev->vendor, (int)pci_dev->device,
-		 (int)pci_dev->revision);
+		 pci_dev->vendor, pci_dev->device, pci_dev->revision);
 
 	privdata = devm_kzalloc(&pci_dev->dev, sizeof(*privdata), GFP_KERNEL);
 	if (!privdata)
 		return -ENOMEM;
 
-	privdata->pci_dev = pci_dev;
-
 	rc = amd_mp2_pci_init(privdata, pci_dev);
 	if (rc)
 		return rc;
 
+	mutex_init(&privdata->c2p_lock);
+	privdata->pci_dev = pci_dev;
+
 	amd_mp2_init_debugfs(privdata);
 	dev_info(&pci_dev->dev, "MP2 device registered.\n");
 	return 0;
+}
+
+static bool amd_mp2_pci_is_probed(struct pci_dev *pci_dev)
+{
+	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+
+	if (!privdata)
+		return false;
+	return privdata->pci_dev != NULL;
 }
 
 static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
@@ -574,17 +582,17 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 	unsigned int bus_id;
 
 	for (bus_id = 0; bus_id < 2; bus_id++)
-		if (privdata->plat_common[bus_id])
-			amd_mp2_unregister_cb(privdata->plat_common[bus_id]);
+		if (privdata->busses[bus_id])
+			i2c_amd_delete_adapter(privdata->busses[bus_id]);
 
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(privdata->debugfs_dir);
 #endif /* CONFIG_DEBUG_FS */
 
-	amd_mp2_clear_reg(privdata);
-
 	pci_intx(pci_dev, 0);
 	pci_clear_master(pci_dev);
+
+	amd_mp2_clear_reg(privdata);
 }
 
 static const struct pci_device_id amd_mp2_pci_tbl[] = {
@@ -669,6 +677,8 @@ struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate)
 		return NULL;
 
 	pci_dev = to_pci_dev(dev);
+	if (!amd_mp2_pci_is_probed(pci_dev))
+		return NULL;
 	return (struct amd_mp2_dev *)pci_get_drvdata(pci_dev);
 }
 

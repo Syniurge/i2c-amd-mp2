@@ -9,13 +9,12 @@
  *          Elie Morisse <syniurge@gmail.com>
  */
 
+#include <linux/acpi.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/platform_device.h>
-#include <linux/acpi.h>
-#include <linux/delay.h>
+#include <linux/slab.h>
+#include <linux/types.h>
 
 #include "i2c-amd-mp2.h"
 
@@ -27,14 +26,12 @@
  * @i2c_common: shared context with the MP2 PCI driver
  * @pdev: platform driver node
  * @adapter: i2c adapter
- * @xfer_lock: xfer lock
  * @completion: xfer completion object
  */
 struct amd_i2c_dev {
 	struct amd_i2c_common i2c_common;
 	struct platform_device *pdev;
 	struct i2c_adapter adapter;
-	struct mutex xfer_lock;
 	struct completion msg_complete;
 	bool is_connected;
 };
@@ -68,7 +65,6 @@ static int i2c_amd_pci_xconnect(struct amd_i2c_dev *i2c_dev, bool enable)
 	if (timeout == 0) {
 		dev_err(&i2c_dev->pdev->dev,
 			"i2c connection timed out\n");
-		mutex_unlock(&i2c_dev->xfer_lock);
 		return -ETIMEDOUT;
 	}
 
@@ -104,26 +100,22 @@ static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 
 static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 {
-	struct amd_i2c_dev *dev = i2c_get_adapdata(adap);
+	struct amd_i2c_dev *i2c_dev = i2c_get_adapdata(adap);
 	int i;
 	struct i2c_msg *pmsg;
 	int err;
 
-	mutex_lock(&dev->xfer_lock);
-
-	if (unlikely(!dev->is_connected)) {
-		i2c_amd_pci_xconnect(dev, true);
-		dev->is_connected = 1;
+	if (unlikely(!i2c_dev->is_connected)) {
+		i2c_amd_pci_xconnect(i2c_dev, true);
+		i2c_dev->is_connected = 1;
 	}
 
 	for (i = 0; i < num; i++) {
 		pmsg = &msgs[i];
-		err = i2c_amd_xfer_msg(dev, pmsg);
+		err = i2c_amd_xfer_msg(i2c_dev, pmsg);
 		if (err)
 			break;
 	}
-
-	mutex_unlock(&dev->xfer_lock);
 
 	if (err)
 		return err;
@@ -185,32 +177,45 @@ static struct device *i2c_amd_acpi_get_first_phys_node(struct acpi_device *adev)
 }
 
 /*
- * Take the first PCI device listed by the _DEP method as a hint.
- * On Lenovo Ideapad/Yoga _DEP appears to be the only available hint at which
- * PCI device an AMDI0011 ACPI device corresponds to.
+ * On Lenovo Ideapad/Yoga the _DEP ACPI method appears to be the only available
+ * hint at which PCI device an AMDI0011 ACPI device corresponds to.
+ * i2c_amd_find_mp2_hint goes through the PCI devices enumerated by the _DEP
+ * method and select the first listed MP2 device.
  */
-static struct pci_dev *i2c_amd_find_pci_parent_hint(struct acpi_device *adev)
+static struct amd_mp2_dev *i2c_amd_find_mp2_hint(struct acpi_device *adev)
 {
-	struct acpi_device *parent_adev;
-	struct device *phys_dev;
 	struct acpi_handle_list dep_devices;
 	acpi_status status;
+	struct amd_mp2_dev *mp2_dev = NULL;
+	int i;
 
 	if (!acpi_has_method(adev->handle, "_DEP"))
 		return NULL;
 
 	status = acpi_evaluate_reference(adev->handle, "_DEP", NULL,
 					 &dep_devices);
-	if (ACPI_FAILURE(status) || !dep_devices.count)
+	if (ACPI_FAILURE(status))
 		return NULL;
 
-	if (acpi_bus_get_device(dep_devices.handles[0], &parent_adev))
-		return NULL;
-	phys_dev = i2c_amd_acpi_get_first_phys_node(parent_adev);
+	for (i = 0; i < dep_devices.count; i++) {
+		struct acpi_device *dep_adev;
+		struct device *dep_phys_dev;
+		struct pci_dev *pci_candidate;
 
-	if (!dev_is_pci(phys_dev))
-		return NULL;
-	return to_pci_dev(phys_dev);
+		if (acpi_bus_get_device(dep_devices.handles[i], &dep_adev))
+			continue;
+		dep_phys_dev = i2c_amd_acpi_get_first_phys_node(dep_adev);
+
+		if (!dep_phys_dev || !dev_is_pci(dep_phys_dev))
+			continue;
+		pci_candidate = to_pci_dev(dep_phys_dev);
+
+		mp2_dev = amd_mp2_find_device(pci_candidate);
+		if (mp2_dev)
+			break;
+	}
+
+	return mp2_dev;
 }
 
 static const struct i2c_adapter_quirks amd_i2c_dev_quirks = {
@@ -224,16 +229,14 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	struct amd_i2c_dev *i2c_dev;
 	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
 	struct acpi_device *adev;
-	struct pci_dev *parent_candidate = NULL;
 	struct amd_mp2_dev *mp2_dev;
 	const char *uid;
 
 	if (acpi_bus_get_device(handle, &adev))
 		return -ENODEV;
 
-	parent_candidate = i2c_amd_find_pci_parent_hint(adev);
-	mp2_dev = amd_mp2_find_device(parent_candidate);
-	if (!mp2_dev && parent_candidate)
+	mp2_dev = i2c_amd_find_mp2_hint(adev);
+	if (!mp2_dev)
 		/* If the hint pointed at a PCI device which isn't a MP2, go
 		 * for the first MP2 device registered in the PCI driver
 		 */
@@ -254,9 +257,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	if (!uid) {
 		dev_err(&pdev->dev, "missing UID/bus id!\n");
 		return -EINVAL;
-	}
-
-	if (strcmp(uid, "0") == 0) {
+	} else if (strcmp(uid, "0") == 0) {
 		i2c_dev->i2c_common.bus_id = 0;
 	} else if (strcmp(uid, "1") == 0) {
 		i2c_dev->i2c_common.bus_id = 1;
@@ -277,6 +278,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	i2c_dev->adapter.quirks = &amd_i2c_dev_quirks;
 	i2c_dev->adapter.dev.parent = &pdev->dev;
 	i2c_dev->adapter.algo_data = i2c_dev;
+	i2c_dev->adapter.nr = pdev->id;
 	ACPI_COMPANION_SET(&i2c_dev->adapter.dev, ACPI_COMPANION(&pdev->dev));
 	i2c_dev->adapter.dev.of_node = pdev->dev.of_node;
 	snprintf(i2c_dev->adapter.name, sizeof(i2c_dev->adapter.name),
@@ -284,10 +286,9 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	i2c_set_adapdata(&i2c_dev->adapter, i2c_dev);
 
 	init_completion(&i2c_dev->msg_complete);
-	mutex_init(&i2c_dev->xfer_lock);
 
-	/* and finally attach to i2c layer */
-	ret = i2c_add_adapter(&i2c_dev->adapter);
+	/* and finally attach to the i2c layer */
+	ret = i2c_add_numbered_adapter(&i2c_dev->adapter);
 
 	if (ret < 0)
 		dev_err(&pdev->dev, "i2c add adapter failed = %d\n", ret);
@@ -299,13 +300,20 @@ void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
+	i2c_lock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+	if (!i2c_common->mp2_dev) {
+		i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+		return;
+	}
+
 	if (i2c_dev->is_connected)
 		i2c_amd_pci_xconnect(i2c_dev, false);
 
 	amd_mp2_unregister_cb(i2c_common);
-	i2c_del_adapter(&i2c_dev->adapter);
 
 	i2c_common->mp2_dev = NULL;
+	i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+	i2c_del_adapter(&i2c_dev->adapter);
 }
 
 static int i2c_amd_remove(struct platform_device *pdev)
