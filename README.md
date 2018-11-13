@@ -1,6 +1,6 @@
 ## i2c-amd-mp2
 
-This is a major rework of the proposed [MP2 I2C controller driver](https://patchwork.kernel.org/patch/10597369/) initially written by AMD for recent Ryzen-based laptops (e.g Dell Latitude 5495, Lenovo Yoga 530, ...'s touchpad/touchscreen), which had a number of issues:
+This is a major rework of the proposed [MP2 I2C controller driver](https://patchwork.kernel.org/patch/10597369/) initially written by AMD for recent Ryzen-based laptops (e.g Dell Latitude 5495, Lenovo Yoga 530/Ideapad 530s, ...'s touchpad/touchscreen), which had a number of issues:
 
  * couldn't work with more than one bus
  * assumed that there's only one slave

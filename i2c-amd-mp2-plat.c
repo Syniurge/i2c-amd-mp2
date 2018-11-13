@@ -36,7 +36,7 @@ struct amd_i2c_dev {
 	struct i2c_adapter adapter;
 	struct mutex xfer_lock;
 	struct completion msg_complete;
-	bool is_configured;
+	bool is_connected;
 };
 
 #define amd_i2c_dev_common(__common) \
@@ -111,10 +111,9 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 
 	mutex_lock(&dev->xfer_lock);
 
-	if (unlikely(!dev->is_configured)) {
-		amd_mp2_register_cb(&dev->i2c_common);
+	if (unlikely(!dev->is_connected)) {
 		i2c_amd_pci_xconnect(dev, true);
-		dev->is_configured = 1;
+		dev->is_connected = 1;
 	}
 
 	for (i = 0; i < num; i++) {
@@ -236,7 +235,8 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	mp2_dev = amd_mp2_find_device(parent_candidate);
 	if (!mp2_dev && parent_candidate)
 		/* If the hint pointed at a PCI device which isn't a MP2, go
-		 * for the first MP2 device registered in the PCI driver */
+		 * for the first MP2 device registered in the PCI driver
+		 */
 		mp2_dev = amd_mp2_find_device(NULL);
 	if (!mp2_dev)
 		/* The corresponding MP2 PCI device might get probed later */
@@ -266,6 +266,9 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	}
 	dev_dbg(&pdev->dev, "bus id is %u\n", i2c_dev->i2c_common.bus_id);
 
+	if (amd_mp2_register_cb(&i2c_dev->i2c_common))
+		return -EINVAL;
+
 	i2c_dev->i2c_common.i2c_speed = i2c_amd_get_bus_speed(pdev);
 
 	/* setup i2c adapter description */
@@ -292,15 +295,25 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	return ret;
 }
 
+void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common)
+{
+	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
+
+	if (i2c_dev->is_connected)
+		i2c_amd_pci_xconnect(i2c_dev, false);
+
+	amd_mp2_unregister_cb(i2c_common);
+	i2c_del_adapter(&i2c_dev->adapter);
+
+	i2c_common->mp2_dev = NULL;
+}
+
 static int i2c_amd_remove(struct platform_device *pdev)
 {
 	struct amd_i2c_dev *i2c_dev = platform_get_drvdata(pdev);
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 
-	i2c_amd_pci_xconnect(i2c_dev, false);
-
-	amd_mp2_register_cb(i2c_common);
-	i2c_del_adapter(&i2c_dev->adapter);
+	i2c_amd_delete_adapter(i2c_common);
 
 	return 0;
 }

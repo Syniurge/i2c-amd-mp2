@@ -102,6 +102,20 @@ static void amd_mp2_cmd_rw_fill(struct amd_i2c_common *i2c_common,
 	i2c_cmd_base->s.length = i2c_common->msg->len;
 }
 
+#ifndef i2c_get_dma_safe_msg_buf
+// DKMS only, for kernels older than 4.16, assume msg->buf to be DMA safe since
+// I2C_M_DMA_SAFE wasn't introduced either
+u8 *i2c_get_dma_safe_msg_buf(struct i2c_msg *msg, unsigned int threshold)
+{
+	/* ... */
+
+	/* if (msg->flags & I2C_M_DMA_SAFE) */
+		return msg->buf;
+
+	/* ... */
+}
+#endif
+
 static int amd_mp2_dma_map(struct amd_mp2_dev *privdata,
 			   struct amd_i2c_common *i2c_common)
 {
@@ -355,8 +369,15 @@ int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 
 	if (i2c_common->bus_id > 1)
 		return -EINVAL;
-	privdata->plat_common[i2c_common->bus_id] = i2c_common;
 
+	if (privdata->plat_common[i2c_common->bus_id] != NULL) {
+		dev_err(ndev_dev(privdata),
+			"Bus already taken, incorrect MP2 <-> ACPI "
+			"device association!\n");
+		return -EINVAL;
+	}
+
+	privdata->plat_common[i2c_common->bus_id] = i2c_common;
 	INIT_DELAYED_WORK(&i2c_common->work, amd_mp2_pci_work);
 
 	return 0;
@@ -554,7 +575,7 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 
 	for (bus_id = 0; bus_id < 2; bus_id++)
 		if (privdata->plat_common[bus_id])
-			amd_mp2_register_cb(privdata->plat_common[bus_id]);
+			amd_mp2_unregister_cb(privdata->plat_common[bus_id]);
 
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(privdata->debugfs_dir);

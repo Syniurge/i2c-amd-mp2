@@ -183,6 +183,12 @@ struct amd_mp2_dev {
 #endif /* CONFIG_DEBUG_FS */
 };
 
+#define ndev_pdev(ndev) ((ndev)->pci_dev)
+#define ndev_name(ndev) pci_name(ndev_pdev(ndev))
+#define ndev_dev(ndev) (&ndev_pdev(ndev)->dev)
+#define work_amd_i2c_common(__work) \
+	container_of(__work, struct amd_i2c_common, work.work)
+
 /* PCIe communication driver */
 
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
@@ -199,14 +205,9 @@ struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate);
 /* Platform driver */
 
 void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common);
+void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common);
 
 int i2c_amd_register_driver(void);
 void i2c_amd_unregister_driver(void);
-
-#define ndev_pdev(ndev) ((ndev)->pci_dev)
-#define ndev_name(ndev) pci_name(ndev_pdev(ndev))
-#define ndev_dev(ndev) (&ndev_pdev(ndev)->dev)
-#define work_amd_i2c_common(__work) \
-	container_of(__work, struct amd_i2c_common, work.work)
 
 #endif
