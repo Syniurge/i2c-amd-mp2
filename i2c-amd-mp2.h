@@ -142,6 +142,8 @@ union i2c_event {
  * @msg: i2c message
  * @work: delayed worker struct
  * @reqcmd: requested i2c command type
+ * @cmd_success: set to true if the MP2 responded to a command with
+ * 		 the expected status and response type
  * @bus_id: bus index
  * @i2c_speed: i2c bus speed determined by the slowest slave
  * @dma_addr: if length > 32, holds the DMA buffer address
@@ -153,6 +155,7 @@ struct amd_i2c_common {
 	struct i2c_msg *msg;
 	struct delayed_work work;
 	enum i2c_cmd reqcmd;
+	bool cmd_success;
 	u8 bus_id;
 	enum speed_enum i2c_speed;
 	u8 *dma_buf;
@@ -193,7 +196,7 @@ struct amd_mp2_dev {
 
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
 int amd_mp2_write(struct amd_i2c_common *i2c_common);
-int amd_mp2_connect(struct amd_i2c_common *i2c_common, bool enable);
+int amd_mp2_bus_xnable(struct amd_i2c_common *i2c_common, bool enable);
 
 void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common);
 

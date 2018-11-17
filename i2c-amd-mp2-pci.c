@@ -71,7 +71,7 @@ static int amd_mp2_cmd(struct amd_mp2_dev *privdata,
 	return 0;
 }
 
-int amd_mp2_connect(struct amd_i2c_common *i2c_common, bool enable)
+int amd_mp2_bus_xnable(struct amd_i2c_common *i2c_common, bool enable)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 	union i2c_cmd_base i2c_cmd_base;
@@ -225,15 +225,24 @@ static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 	int len = i2c_common->eventval.r.length;
 	u32 slave_addr = i2c_common->eventval.r.slave_addr;
+	bool err = false;
 
-	if (len != i2c_common->msg->len)
+	if (len != i2c_common->msg->len) {
 		dev_err(ndev_dev(privdata),
 			"length %d in event doesn't match buffer length %d!\n",
 			len, i2c_common->msg->len);
-	if (slave_addr != i2c_common->msg->addr)
+		err = true;
+	}
+
+	if (slave_addr != i2c_common->msg->addr) {
 		dev_err(ndev_dev(privdata),
 			"unexpected slave address %x (expected: %x)!\n",
 			slave_addr, i2c_common->msg->addr);
+		err = true;
+	}
+
+	if (!err)
+		i2c_common->cmd_success = true;
 }
 
 static void amd_mp2_pci_do_work(struct work_struct *work)
@@ -254,7 +263,6 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata), "i2c command failed!\n");
 		else
 			dev_err(ndev_dev(privdata), "invalid response to i2c command!\n");
-		i2c_amd_msg_completion(i2c_common);
 		return;
 	}
 
@@ -289,6 +297,8 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after bus enable (%d)!\n",
 				sts);
+		else
+			i2c_common->cmd_success = true;
 		break;
 	case i2c_disable:
 		if (sts == i2c_busdisable_failed)
@@ -297,12 +307,12 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after bus disable (%d)!\n",
 				sts);
+		else
+			i2c_common->cmd_success = true;
 		break;
 	default:
 		break;
 	}
-
-	i2c_amd_msg_completion(i2c_common);
 }
 
 static void amd_mp2_pci_work(struct work_struct *work)
@@ -314,6 +324,10 @@ static void amd_mp2_pci_work(struct work_struct *work)
 	amd_mp2_pci_do_work(work);
 
 	i2c_common->reqcmd = i2c_none;
+	i2c_amd_msg_completion(i2c_common);
+
+	synchronize_irq(privdata->pci_dev->irq);
+	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 
 	if (cmd == i2c_read || cmd == i2c_write)
 		mutex_unlock(&privdata->c2p_lock);
@@ -326,33 +340,24 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 	u32 val;
 	unsigned int bus_id;
 	void __iomem *reg;
-	unsigned long flags;
 	enum irqreturn ret = IRQ_NONE;
-
-	raw_spin_lock_irqsave(&privdata->lock, flags);
 
 	for (bus_id = 0; bus_id < 2; bus_id++) {
 		i2c_common = privdata->busses[bus_id];
-		if (!i2c_common)
+		if (!i2c_common || i2c_common->reqcmd == i2c_none)
 			continue;
 
 		reg = privdata->mmio + ((bus_id == 0) ?
 					AMD_P2C_MSG1 : AMD_P2C_MSG2);
 		val = readl(reg);
 		if (val != 0) {
-			i2c_common->eventval.ul = val;
-
 			writel(0, reg);
-			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
-
-			if (i2c_common->reqcmd != i2c_none)
-				schedule_delayed_work(&i2c_common->work, 0);
-
+			i2c_common->eventval.ul = val;
+			schedule_delayed_work(&i2c_common->work, 0);
 			ret = IRQ_HANDLED;
 		}
 	}
 
-	raw_spin_unlock_irqrestore(&privdata->lock, flags);
 	return ret;
 }
 
@@ -360,6 +365,7 @@ void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
+	i2c_common->reqcmd = i2c_none;
 	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
@@ -601,60 +607,60 @@ static const struct pci_device_id amd_mp2_pci_tbl[] = {
 };
 MODULE_DEVICE_TABLE(pci, amd_mp2_pci_tbl);
 
-#ifdef CONFIG_PM_SLEEP
-static int amd_mp2_pci_device_suspend(struct pci_dev *pci_dev,
-				      pm_message_t mesg)
-{
-	int ret;
-	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
-
-	if (!privdata)
-		return -EINVAL;
-
-	ret = pci_save_state(pci_dev);
-	if (ret) {
-		dev_err(ndev_dev(privdata),
-			"pci_save_state failed = %d\n", ret);
-		return ret;
-	}
-
-	pci_enable_wake(pci_dev, PCI_D3hot, 0);
-	pci_disable_device(pci_dev);
-	pci_set_power_state(pci_dev, pci_choose_state(pci_dev, mesg));
-
-	return 0;
-}
-
-static int amd_mp2_pci_device_resume(struct pci_dev *pci_dev)
-{
-	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
-
-	if (!privdata)
-		return -EINVAL;
-
-	pci_set_power_state(pci_dev, PCI_D0);
-	pci_restore_state(pci_dev);
-
-	if (pci_enable_device(pci_dev) < 0) {
-		dev_err(ndev_dev(privdata), "pci_enable_device failed\n");
-		return -EIO;
-	}
-
-	pci_enable_wake(pci_dev, PCI_D3hot, 0);
-
-	return 0;
-}
-#endif
+// #ifdef CONFIG_PM_SLEEP
+// static int amd_mp2_pci_device_suspend(struct pci_dev *pci_dev,
+// 				      pm_message_t mesg)
+// {
+// 	int ret;
+// 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+//
+// 	if (!privdata)
+// 		return -EINVAL;
+//
+// 	ret = pci_save_state(pci_dev);
+// 	if (ret) {
+// 		dev_err(ndev_dev(privdata),
+// 			"pci_save_state failed = %d\n", ret);
+// 		return ret;
+// 	}
+//
+// 	pci_enable_wake(pci_dev, PCI_D3hot, 0);
+// 	pci_disable_device(pci_dev);
+// 	pci_set_power_state(pci_dev, pci_choose_state(pci_dev, mesg));
+//
+// 	return 0;
+// }
+//
+// static int amd_mp2_pci_device_resume(struct pci_dev *pci_dev)
+// {
+// 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+//
+// 	if (!privdata)
+// 		return -EINVAL;
+//
+// 	pci_set_power_state(pci_dev, PCI_D0);
+// 	pci_restore_state(pci_dev);
+//
+// 	if (pci_enable_device(pci_dev) < 0) {
+// 		dev_err(ndev_dev(privdata), "pci_enable_device failed\n");
+// 		return -EIO;
+// 	}
+//
+// 	pci_enable_wake(pci_dev, PCI_D3hot, 0);
+//
+// 	return 0;
+// }
+// #endif
 
 static struct pci_driver amd_mp2_pci_driver = {
 	.name		= DRIVER_NAME,
 	.id_table	= amd_mp2_pci_tbl,
 	.probe		= amd_mp2_pci_probe,
 	.remove		= amd_mp2_pci_remove,
-#ifdef CONFIG_PM_SLEEP
-	.suspend	= amd_mp2_pci_device_suspend,
-	.resume		= amd_mp2_pci_device_resume,
-#endif
+// #ifdef CONFIG_PM_SLEEP
+// 	.suspend	= amd_mp2_pci_device_suspend,
+// 	.resume		= amd_mp2_pci_device_resume,
+// #endif
 };
 
 static int amd_mp2_device_match(struct device *dev, void *data)

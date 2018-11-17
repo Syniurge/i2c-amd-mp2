@@ -33,7 +33,7 @@ struct amd_i2c_dev {
 	struct platform_device *pdev;
 	struct i2c_adapter adapter;
 	struct completion msg_complete;
-	bool is_connected;
+	bool is_enabled;
 };
 
 #define amd_i2c_dev_common(__common) \
@@ -52,50 +52,71 @@ void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common)
 	complete(&i2c_dev->msg_complete);
 }
 
-static int i2c_amd_pci_xconnect(struct amd_i2c_dev *i2c_dev, bool enable)
+static const char* i2c_amd_cmd_name(enum i2c_cmd cmd)
+{
+	switch (cmd) {
+	case i2c_read:
+		return "i2c read";
+	case i2c_write:
+		return "i2c write";
+	case i2c_enable:
+		return "bus enable";
+	case i2c_disable:
+		return "bus disable";
+	case number_of_sensor_discovered:
+		return "'number of sensors discovered' cmd";
+	case is_mp2_active:
+		return "'is mp2 active' cmd";
+	default:
+		return "invalid cmd";
+	}
+}
+
+static int i2c_amd_check_msg_completion(struct amd_i2c_dev *i2c_dev)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 	unsigned long timeout;
 
-	reinit_completion(&i2c_dev->msg_complete);
-
-	amd_mp2_connect(i2c_common, enable);
 	timeout = wait_for_completion_timeout(&i2c_dev->msg_complete,
 					      AMD_I2C_TIMEOUT);
 	if (timeout == 0) {
-		dev_err(&i2c_dev->pdev->dev,
-			"i2c connection timed out\n");
+		dev_err(&i2c_dev->pdev->dev, "%s timed out\n",
+			i2c_amd_cmd_name(i2c_common->reqcmd));
+		amd_mp2_rw_timeout(i2c_common);
 		return -ETIMEDOUT;
 	}
 
+	if (!i2c_common->cmd_success)
+		return -EINVAL;
+
 	return 0;
+}
+
+static int i2c_amd_xnable(struct amd_i2c_dev *i2c_dev, bool enable)
+{
+	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
+
+	reinit_completion(&i2c_dev->msg_complete);
+	amd_mp2_bus_xnable(i2c_common, enable);
+
+	return i2c_amd_check_msg_completion(i2c_dev);
 }
 
 static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
-	unsigned long timeout;
-	bool is_read = pmsg->flags & I2C_M_RD;
 
 	reinit_completion(&i2c_dev->msg_complete);
 
 	i2c_common->msg = pmsg;
+	i2c_common->cmd_success = false;
 
-	if (is_read)
+	if (pmsg->flags & I2C_M_RD)
 		amd_mp2_read(i2c_common);
 	else
 		amd_mp2_write(i2c_common);
 
-	timeout = wait_for_completion_timeout(&i2c_dev->msg_complete,
-					      AMD_I2C_TIMEOUT);
-	if (timeout == 0) {
-		dev_err(&i2c_dev->pdev->dev, "i2c %s timed out\n",
-			is_read ? "read" : "write");
-		amd_mp2_rw_timeout(i2c_common);
-		return -ETIMEDOUT;
-	}
-
-	return 0;
+	return i2c_amd_check_msg_completion(i2c_dev);
 }
 
 static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
@@ -105,20 +126,20 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	struct i2c_msg *pmsg;
 	int err;
 
-	if (unlikely(!i2c_dev->is_connected)) {
-		i2c_amd_pci_xconnect(i2c_dev, true);
-		i2c_dev->is_connected = 1;
+	if (unlikely(!i2c_dev->is_enabled)) {
+		err = i2c_amd_xnable(i2c_dev, true);
+		if (err)
+			return err;
+		i2c_dev->is_enabled = 1;
 	}
 
 	for (i = 0; i < num; i++) {
 		pmsg = &msgs[i];
 		err = i2c_amd_xfer_msg(i2c_dev, pmsg);
 		if (err)
-			break;
+			return err;
 	}
 
-	if (err)
-		return err;
 	return num;
 }
 
@@ -131,6 +152,34 @@ static const struct i2c_algorithm i2c_amd_algorithm = {
 	.master_xfer = i2c_amd_xfer,
 	.functionality = i2c_amd_func,
 };
+
+#ifdef CONFIG_PM
+static int i2c_amd_suspend(struct device *dev)
+{
+	struct amd_i2c_dev *i2c_dev = dev_get_drvdata(dev);
+
+	i2c_lock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+	i2c_amd_xnable(i2c_dev, false);
+	i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+
+	return 0;
+}
+
+static int i2c_amd_resume(struct device *dev)
+{
+	struct amd_i2c_dev *i2c_dev = dev_get_drvdata(dev);
+	int ret;
+
+	i2c_lock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+	ret = i2c_amd_xnable(i2c_dev, true);
+	i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+
+	return ret;
+}
+
+static UNIVERSAL_DEV_PM_OPS(i2c_amd_pm_ops, i2c_amd_suspend,
+			    i2c_amd_resume, NULL);
+#endif
 
 static enum speed_enum i2c_amd_get_bus_speed(struct platform_device *pdev)
 {
@@ -306,8 +355,8 @@ void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common)
 		return;
 	}
 
-	if (i2c_dev->is_connected)
-		i2c_amd_pci_xconnect(i2c_dev, false);
+	if (i2c_dev->is_enabled)
+		i2c_amd_xnable(i2c_dev, false);
 
 	amd_mp2_unregister_cb(i2c_common);
 
@@ -338,6 +387,9 @@ static struct platform_driver i2c_amd_plat_driver = {
 	.driver = {
 		.name = "i2c_amd_mp2",
 		.acpi_match_table = ACPI_PTR(i2c_amd_acpi_match),
+#ifdef CONFIG_PM
+// 		.pm = &i2c_amd_pm_ops,
+#endif
 	},
 };
 
