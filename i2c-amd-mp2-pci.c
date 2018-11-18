@@ -314,19 +314,28 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 	}
 }
 
+static void amd_mp2_pci_eoi(struct amd_mp2_dev *privdata)
+{
+	synchronize_irq(privdata->pci_dev->irq);
+	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
+}
+
 static void amd_mp2_pci_work(struct work_struct *work)
 {
 	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
+
+	if (unlikely(i2c_common->reqcmd == i2c_none)) {
+		amd_mp2_pci_eoi(privdata);
+		return;
+	}
 
 	amd_mp2_pci_do_work(work);
 
 	i2c_common->reqcmd = i2c_none;
 	i2c_amd_msg_completion(i2c_common);
 
-	synchronize_irq(privdata->pci_dev->irq);
-	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
-
+	amd_mp2_pci_eoi(privdata);
 	mutex_unlock(&privdata->c2p_lock);
 }
 
@@ -341,7 +350,7 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 
 	for (bus_id = 0; bus_id < 2; bus_id++) {
 		i2c_common = privdata->busses[bus_id];
-		if (!i2c_common || i2c_common->reqcmd == i2c_none)
+		if (!i2c_common)
 			continue;
 
 		reg = privdata->mmio + ((bus_id == 0) ?
