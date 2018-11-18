@@ -19,15 +19,13 @@
 #define DRIVER_DESC	"AMD(R) PCI-E MP2 I2C Controller Driver"
 #define DRIVER_VER	"1.0"
 
-#define write64 _write64
-static inline void _write64(u64 val, void __iomem *mmio)
+static inline void write64(u64 val, void __iomem *mmio)
 {
 	writel(val, mmio);
 	writel(val >> 32, mmio + sizeof(u32));
 }
 
-#define read64 _read64
-static inline u64 _read64(void __iomem *mmio)
+static inline u64 read64(void __iomem *mmio)
 {
 	u64 low, high;
 
@@ -59,10 +57,13 @@ static void amd_mp2_c2p_mutex_unlock(struct amd_i2c_common *i2c_common)
 	mutex_unlock(&privdata->c2p_lock);
 }
 
-static int amd_mp2_cmd(struct amd_mp2_dev *privdata,
+static int amd_mp2_cmd(struct amd_i2c_common *i2c_common,
 		       union i2c_cmd_base i2c_cmd_base)
 {
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 	void __iomem *reg;
+
+	i2c_common->reqcmd = i2c_cmd_base.s.i2c_cmd;
 
 	reg = privdata->mmio + ((i2c_cmd_base.s.bus_id == 1) ?
 				AMD_C2P_MSG1 : AMD_C2P_MSG0);
@@ -79,24 +80,20 @@ int amd_mp2_bus_xnable(struct amd_i2c_common *i2c_common, bool enable)
 	dev_dbg(ndev_dev(privdata), "%s id: %d\n", __func__,
 		i2c_common->bus_id);
 
-	i2c_common->reqcmd = enable ? i2c_enable : i2c_disable;
-
 	i2c_cmd_base.ul = 0;
-	i2c_cmd_base.s.i2c_cmd = i2c_common->reqcmd;
+	i2c_cmd_base.s.i2c_cmd = enable ? i2c_enable : i2c_disable;
 	i2c_cmd_base.s.bus_id = i2c_common->bus_id;
 	i2c_cmd_base.s.i2c_speed = i2c_common->i2c_speed;
 
 	amd_mp2_c2p_mutex_lock(i2c_common);
 
-	return amd_mp2_cmd(privdata, i2c_cmd_base);
+	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
 }
 
 static void amd_mp2_cmd_rw_fill(struct amd_i2c_common *i2c_common,
 				union i2c_cmd_base *i2c_cmd_base,
 				enum i2c_cmd reqcmd)
 {
-	i2c_common->reqcmd = reqcmd;
-
 	i2c_cmd_base->s.i2c_cmd = reqcmd;
 	i2c_cmd_base->s.bus_id = i2c_common->bus_id;
 	i2c_cmd_base->s.i2c_speed = i2c_common->i2c_speed;
@@ -192,7 +189,7 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common)
 			privdata->mmio + AMD_C2P_MSG2);
 	}
 
-	return amd_mp2_cmd(privdata, i2c_cmd_base);
+	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
 }
 
 int amd_mp2_write(struct amd_i2c_common *i2c_common)
@@ -219,7 +216,7 @@ int amd_mp2_write(struct amd_i2c_common *i2c_common)
 			privdata->mmio + AMD_C2P_MSG2);
 	}
 
-	return amd_mp2_cmd(privdata, i2c_cmd_base);
+	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
 }
 
 static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
