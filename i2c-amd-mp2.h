@@ -177,7 +177,6 @@ struct amd_mp2_dev {
 	struct pci_dev *pci_dev;
 	struct amd_i2c_common *busses[2];
 	void __iomem *mmio;
-	raw_spinlock_t lock;
 	struct mutex c2p_lock;
 	u8 c2p_lock_busid;
 #ifdef CONFIG_DEBUG_FS

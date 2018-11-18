@@ -86,6 +86,8 @@ int amd_mp2_bus_xnable(struct amd_i2c_common *i2c_common, bool enable)
 	i2c_cmd_base.s.bus_id = i2c_common->bus_id;
 	i2c_cmd_base.s.i2c_speed = i2c_common->i2c_speed;
 
+	amd_mp2_c2p_mutex_lock(i2c_common);
+
 	return amd_mp2_cmd(privdata, i2c_cmd_base);
 }
 
@@ -319,7 +321,6 @@ static void amd_mp2_pci_work(struct work_struct *work)
 {
 	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-	enum i2c_cmd cmd = i2c_common->reqcmd;
 
 	amd_mp2_pci_do_work(work);
 
@@ -329,8 +330,7 @@ static void amd_mp2_pci_work(struct work_struct *work)
 	synchronize_irq(privdata->pci_dev->irq);
 	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 
-	if (cmd == i2c_read || cmd == i2c_write)
-		mutex_unlock(&privdata->c2p_lock);
+	mutex_unlock(&privdata->c2p_lock);
 }
 
 static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
@@ -524,7 +524,6 @@ static int amd_mp2_pci_init(struct amd_mp2_dev *privdata,
 
 	/* Set up intx irq */
 	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
-	raw_spin_lock_init(&privdata->lock);
 	pci_intx(pci_dev, 1);
 	rc = devm_request_irq(&pci_dev->dev, pci_dev->irq, amd_mp2_irq_isr,
 			      IRQF_SHARED, dev_name(&pci_dev->dev), privdata);
