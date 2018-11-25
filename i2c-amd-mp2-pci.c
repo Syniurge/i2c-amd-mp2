@@ -364,6 +364,14 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 		}
 	}
 
+	if (ret != IRQ_HANDLED) {
+		val = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
+		if (unlikely(val != 0)) {
+			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
+			ret = IRQ_HANDLED;
+		}
+	}
+
 	return ret;
 }
 
@@ -372,7 +380,7 @@ void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
 	i2c_common->reqcmd = i2c_none;
-	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
+	amd_mp2_pci_eoi(privdata);
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
 
@@ -573,6 +581,11 @@ static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
 	mutex_init(&privdata->c2p_lock);
 	privdata->pci_dev = pci_dev;
 
+	pm_runtime_set_autosuspend_delay(&pci_dev->dev, 1000);
+	pm_runtime_use_autosuspend(&pci_dev->dev);
+	pm_runtime_put_autosuspend(&pci_dev->dev);
+	pm_runtime_allow(&pci_dev->dev);
+
 	amd_mp2_init_debugfs(privdata);
 	dev_info(&pci_dev->dev, "MP2 device registered.\n");
 	return 0;
@@ -596,6 +609,9 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 		if (privdata->busses[bus_id])
 			i2c_amd_delete_adapter(privdata->busses[bus_id]);
 
+	pm_runtime_forbid(&pci_dev->dev);
+	pm_runtime_get_noresume(&pci_dev->dev);
+
 #ifdef CONFIG_DEBUG_FS
 	debugfs_remove_recursive(privdata->debugfs_dir);
 #endif /* CONFIG_DEBUG_FS */
@@ -606,66 +622,74 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 	amd_mp2_clear_reg(privdata);
 }
 
+#ifdef CONFIG_PM
+static int amd_mp2_pci_suspend(struct device *dev)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+	unsigned int bus_id;
+	int ret = 0;
+
+	for (bus_id = 0; bus_id < 2; bus_id++)
+		if (privdata->busses[bus_id])
+			i2c_amd_suspend(privdata->busses[bus_id]);
+
+	ret = pci_save_state(pci_dev);
+	if (ret) {
+		dev_err(ndev_dev(privdata),
+			"pci_save_state failed = %d\n", ret);
+		return ret;
+	}
+
+	pci_disable_device(pci_dev);
+	return ret;
+}
+
+static int amd_mp2_pci_resume(struct device *dev)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+	unsigned int bus_id;
+	int ret = 0;
+
+	pci_restore_state(pci_dev);
+	ret = pci_enable_device(pci_dev);
+	if (ret < 0) {
+		dev_err(ndev_dev(privdata),
+			"pci_enable_device failed = %d\n", ret);
+		return ret;
+	}
+
+	for (bus_id = 0; bus_id < 2; bus_id++)
+		if (privdata->busses[bus_id]) {
+			ret = i2c_amd_resume(privdata->busses[bus_id]);
+			if (ret < 0)
+				return ret;
+		}
+
+	return ret;
+}
+
+static UNIVERSAL_DEV_PM_OPS(amd_mp2_pci_pm_ops, amd_mp2_pci_suspend,
+			    amd_mp2_pci_resume, NULL);
+#endif /* CONFIG_PM */
+
 static const struct pci_device_id amd_mp2_pci_tbl[] = {
 	{PCI_VDEVICE(AMD, PCI_DEVICE_ID_AMD_MP2)},
 	{0}
 };
 MODULE_DEVICE_TABLE(pci, amd_mp2_pci_tbl);
 
-// #ifdef CONFIG_PM_SLEEP
-// static int amd_mp2_pci_device_suspend(struct pci_dev *pci_dev,
-// 				      pm_message_t mesg)
-// {
-// 	int ret;
-// 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
-//
-// 	if (!privdata)
-// 		return -EINVAL;
-//
-// 	ret = pci_save_state(pci_dev);
-// 	if (ret) {
-// 		dev_err(ndev_dev(privdata),
-// 			"pci_save_state failed = %d\n", ret);
-// 		return ret;
-// 	}
-//
-// 	pci_enable_wake(pci_dev, PCI_D3hot, 0);
-// 	pci_disable_device(pci_dev);
-// 	pci_set_power_state(pci_dev, pci_choose_state(pci_dev, mesg));
-//
-// 	return 0;
-// }
-//
-// static int amd_mp2_pci_device_resume(struct pci_dev *pci_dev)
-// {
-// 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
-//
-// 	if (!privdata)
-// 		return -EINVAL;
-//
-// 	pci_set_power_state(pci_dev, PCI_D0);
-// 	pci_restore_state(pci_dev);
-//
-// 	if (pci_enable_device(pci_dev) < 0) {
-// 		dev_err(ndev_dev(privdata), "pci_enable_device failed\n");
-// 		return -EIO;
-// 	}
-//
-// 	pci_enable_wake(pci_dev, PCI_D3hot, 0);
-//
-// 	return 0;
-// }
-// #endif
-
 static struct pci_driver amd_mp2_pci_driver = {
 	.name		= DRIVER_NAME,
 	.id_table	= amd_mp2_pci_tbl,
 	.probe		= amd_mp2_pci_probe,
 	.remove		= amd_mp2_pci_remove,
-// #ifdef CONFIG_PM_SLEEP
-// 	.suspend	= amd_mp2_pci_device_suspend,
-// 	.resume		= amd_mp2_pci_device_resume,
-// #endif
+#ifdef CONFIG_PM
+	.driver = {
+		.pm	= &amd_mp2_pci_pm_ops,
+	},
+#endif
 };
 
 static int amd_mp2_device_match(struct device *dev, void *data)

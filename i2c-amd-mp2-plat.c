@@ -33,7 +33,6 @@ struct amd_i2c_dev {
 	struct platform_device *pdev;
 	struct i2c_adapter adapter;
 	struct completion msg_complete;
-	bool is_enabled;
 };
 
 #define amd_i2c_dev_common(__common) \
@@ -52,7 +51,7 @@ void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common)
 	complete(&i2c_dev->msg_complete);
 }
 
-static const char* i2c_amd_cmd_name(enum i2c_cmd cmd)
+static const char *i2c_amd_cmd_name(enum i2c_cmd cmd)
 {
 	switch (cmd) {
 	case i2c_read:
@@ -126,21 +125,17 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	struct i2c_msg *pmsg;
 	int err;
 
-	if (unlikely(!i2c_dev->is_enabled)) {
-		err = i2c_amd_xnable(i2c_dev, true);
-		if (err)
-			return err;
-		i2c_dev->is_enabled = 1;
-	}
+	amd_mp2_pm_runtime_get(i2c_dev->i2c_common.mp2_dev);
 
 	for (i = 0; i < num; i++) {
 		pmsg = &msgs[i];
 		err = i2c_amd_xfer_msg(i2c_dev, pmsg);
 		if (err)
-			return err;
+			break;
 	}
 
-	return num;
+	amd_mp2_pm_runtime_put(i2c_dev->i2c_common.mp2_dev);
+	return err ? err : num;
 }
 
 static u32 i2c_amd_func(struct i2c_adapter *a)
@@ -154,31 +149,20 @@ static const struct i2c_algorithm i2c_amd_algorithm = {
 };
 
 #ifdef CONFIG_PM
-static int i2c_amd_suspend(struct device *dev)
+int i2c_amd_suspend(struct amd_i2c_common *i2c_common)
 {
-	struct amd_i2c_dev *i2c_dev = dev_get_drvdata(dev);
+	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
-	i2c_lock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
 	i2c_amd_xnable(i2c_dev, false);
-	i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
-
 	return 0;
 }
 
-static int i2c_amd_resume(struct device *dev)
+int i2c_amd_resume(struct amd_i2c_common *i2c_common)
 {
-	struct amd_i2c_dev *i2c_dev = dev_get_drvdata(dev);
-	int ret;
+	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
-	i2c_lock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
-	ret = i2c_amd_xnable(i2c_dev, true);
-	i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
-
-	return ret;
+	return i2c_amd_xnable(i2c_dev, true);
 }
-
-static UNIVERSAL_DEV_PM_OPS(i2c_amd_pm_ops, i2c_amd_suspend,
-			    i2c_amd_resume, NULL);
 #endif
 
 static enum speed_enum i2c_amd_get_bus_speed(struct platform_device *pdev)
@@ -336,7 +320,15 @@ static int i2c_amd_probe(struct platform_device *pdev)
 
 	init_completion(&i2c_dev->msg_complete);
 
-	/* and finally attach to the i2c layer */
+	/* enable the bus */
+	amd_mp2_pm_runtime_get(mp2_dev);
+
+	if (i2c_amd_xnable(i2c_dev, true))
+		dev_err(&pdev->dev, "initial bus enable failed\n");
+
+	amd_mp2_pm_runtime_put(mp2_dev);
+
+	/* attach to the i2c layer */
 	ret = i2c_add_numbered_adapter(&i2c_dev->adapter);
 
 	if (ret < 0)
@@ -355,8 +347,7 @@ void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common)
 		return;
 	}
 
-	if (i2c_dev->is_enabled)
-		i2c_amd_xnable(i2c_dev, false);
+	i2c_amd_xnable(i2c_dev, false);
 
 	amd_mp2_unregister_cb(i2c_common);
 
@@ -387,9 +378,6 @@ static struct platform_driver i2c_amd_plat_driver = {
 	.driver = {
 		.name = "i2c_amd_mp2",
 		.acpi_match_table = ACPI_PTR(i2c_amd_acpi_match),
-#ifdef CONFIG_PM
-// 		.pm = &i2c_amd_pm_ops,
-#endif
 	},
 };
 

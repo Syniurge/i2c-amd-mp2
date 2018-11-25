@@ -11,6 +11,7 @@
 
 #include <linux/i2c.h>
 #include <linux/pci.h>
+#include <linux/pm_runtime.h>
 
 #define PCI_DEVICE_ID_AMD_MP2	0x15E6
 
@@ -143,11 +144,11 @@ union i2c_event {
  * @work: delayed worker struct
  * @reqcmd: requested i2c command type
  * @cmd_success: set to true if the MP2 responded to a command with
- * 		 the expected status and response type
+ *		 the expected status and response type
  * @bus_id: bus index
  * @i2c_speed: i2c bus speed determined by the slowest slave
- * @dma_addr: if length > 32, holds the DMA buffer address
- * @dma_direction: if length > 32, is either FROM or TO device
+ * @dma_addr: if msg length > 32, holds the DMA buffer address
+ * @dma_direction: if msg length > 32, is either FROM or TO device
  */
 struct amd_i2c_common {
 	union i2c_event eventval;
@@ -155,7 +156,7 @@ struct amd_i2c_common {
 	struct i2c_msg *msg;
 	struct delayed_work work;
 	enum i2c_cmd reqcmd;
-	bool cmd_success;
+	u8 cmd_success;
 	u8 bus_id;
 	enum speed_enum i2c_speed;
 	u8 *dma_buf;
@@ -168,7 +169,6 @@ struct amd_i2c_common {
  * @busses: MP2 devices may have up to two busses,
  *	    each bus corresponding to an i2c adapter
  * @mmio: iommapped registers
- * @lock: interrupt spinlock
  * @c2p_lock: controls access to the C2P mailbox shared between
  *	      the two adapters
  * @c2p_lock_busid: id of the adapter which locked c2p_lock
@@ -204,10 +204,26 @@ int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common);
 
 struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate);
 
+static inline void amd_mp2_pm_runtime_get(struct amd_mp2_dev *mp2_dev)
+{
+	pm_runtime_get_sync(&mp2_dev->pci_dev->dev);
+}
+
+static inline void amd_mp2_pm_runtime_put(struct amd_mp2_dev *mp2_dev)
+{
+	pm_runtime_mark_last_busy(&mp2_dev->pci_dev->dev);
+	pm_runtime_put_autosuspend(&mp2_dev->pci_dev->dev);
+}
+
 /* Platform driver */
 
 void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common);
 void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common);
+
+#ifdef CONFIG_PM
+int i2c_amd_suspend(struct amd_i2c_common *i2c_common);
+int i2c_amd_resume(struct amd_i2c_common *i2c_common);
+#endif /* CONFIG_PM */
 
 int i2c_amd_register_driver(void);
 void i2c_amd_unregister_driver(void);
