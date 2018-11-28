@@ -168,19 +168,20 @@ static void amd_mp2_dma_unmap(struct amd_mp2_dev *privdata,
 	i2c_put_dma_safe_msg_buf(i2c_common->dma_buf, i2c_common->msg, true);
 }
 
-int amd_mp2_read(struct amd_i2c_common *i2c_common)
+static int amd_mp2_rw(struct amd_i2c_common *i2c_common, enum i2c_cmd reqcmd)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 	union i2c_cmd_base i2c_cmd_base;
 
-	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
-		i2c_common->msg->addr, i2c_common->bus_id);
-
-	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, i2c_read);
+	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, reqcmd);
 	amd_mp2_c2p_mutex_lock(i2c_common);
 
 	if (i2c_common->msg->len <= 32) {
 		i2c_cmd_base.s.mem_type = use_c2pmsg;
+		if (reqcmd == i2c_write)
+			memcpy_toio(privdata->mmio + AMD_C2P_MSG2,
+				    i2c_common->msg->buf,
+				    i2c_common->msg->len);
 	} else {
 		i2c_cmd_base.s.mem_type = use_dram;
 		if (amd_mp2_dma_map(privdata, i2c_common))
@@ -192,31 +193,24 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common)
 	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
 }
 
-int amd_mp2_write(struct amd_i2c_common *i2c_common)
+int amd_mp2_read(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-	union i2c_cmd_base i2c_cmd_base;
 
 	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
 		i2c_common->msg->addr, i2c_common->bus_id);
 
-	amd_mp2_cmd_rw_fill(i2c_common, &i2c_cmd_base, i2c_write);
-	amd_mp2_c2p_mutex_lock(i2c_common);
+	return amd_mp2_rw(i2c_common, i2c_read);
+}
 
-	if (i2c_common->msg->len <= 32) {
-		i2c_cmd_base.s.mem_type = use_c2pmsg;
-		memcpy_toio(privdata->mmio + AMD_C2P_MSG2,
-			    i2c_common->msg->buf,
-			    i2c_common->msg->len);
-	} else {
-		i2c_cmd_base.s.mem_type = use_dram;
-		if (amd_mp2_dma_map(privdata, i2c_common))
-			return -EIO;
-		write64((u64)i2c_common->dma_addr,
-			privdata->mmio + AMD_C2P_MSG2);
-	}
+int amd_mp2_write(struct amd_i2c_common *i2c_common)
+{
+	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
-	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
+	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
+		i2c_common->msg->addr, i2c_common->bus_id);
+
+	return amd_mp2_rw(i2c_common, i2c_write);
 }
 
 static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
@@ -314,29 +308,26 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 	}
 }
 
-static void amd_mp2_pci_eoi(struct amd_mp2_dev *privdata)
-{
-	synchronize_irq(privdata->pci_dev->irq);
-	writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
-}
-
 static void amd_mp2_pci_work(struct work_struct *work)
 {
 	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
 	if (unlikely(i2c_common->reqcmd == i2c_none)) {
-		amd_mp2_pci_eoi(privdata);
+		dev_warn(ndev_dev(privdata),
+			"received irq with a message but no command was requested"
+			" (bus = %d)!\n", i2c_common->bus_id);
+		synchronize_irq(privdata->pci_dev->irq);
 		return;
 	}
 
 	amd_mp2_pci_do_work(work);
 
 	i2c_common->reqcmd = i2c_none;
-	i2c_amd_msg_completion(i2c_common);
+	i2c_amd_cmd_completion(i2c_common);
 
-	amd_mp2_pci_eoi(privdata);
-	mutex_unlock(&privdata->c2p_lock);
+	synchronize_irq(privdata->pci_dev->irq);
+	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
 
 static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
@@ -360,7 +351,9 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 			writel(0, reg);
 			i2c_common->eventval.ul = val;
 			schedule_delayed_work(&i2c_common->work, 0);
+
 			ret = IRQ_HANDLED;
+			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 		}
 	}
 
@@ -369,6 +362,8 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 		if (unlikely(val != 0)) {
 			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 			ret = IRQ_HANDLED;
+			dev_warn(ndev_dev(privdata),
+				 "received irq without message\n");
 		}
 	}
 
@@ -380,7 +375,7 @@ void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
 	i2c_common->reqcmd = i2c_none;
-	amd_mp2_pci_eoi(privdata);
+	synchronize_irq(privdata->pci_dev->irq);
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
 
@@ -398,7 +393,6 @@ int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 	}
 
 	privdata->busses[i2c_common->bus_id] = i2c_common;
-	i2c_common->reqcmd = i2c_none;
 	INIT_DELAYED_WORK(&i2c_common->work, amd_mp2_pci_work);
 
 	return 0;

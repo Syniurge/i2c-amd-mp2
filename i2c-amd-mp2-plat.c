@@ -32,13 +32,13 @@ struct amd_i2c_dev {
 	struct amd_i2c_common i2c_common;
 	struct platform_device *pdev;
 	struct i2c_adapter adapter;
-	struct completion msg_complete;
+	struct completion cmd_complete;
 };
 
 #define amd_i2c_dev_common(__common) \
 	container_of(__common, struct amd_i2c_dev, i2c_common)
 
-void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common)
+void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 	union i2c_event *event = &i2c_common->eventval;
@@ -48,7 +48,7 @@ void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common)
 			__func__, event->r.length,
 			i2c_common->msg->buf);
 
-	complete(&i2c_dev->msg_complete);
+	complete(&i2c_dev->cmd_complete);
 }
 
 static const char *i2c_amd_cmd_name(enum i2c_cmd cmd)
@@ -71,12 +71,20 @@ static const char *i2c_amd_cmd_name(enum i2c_cmd cmd)
 	}
 }
 
-static int i2c_amd_check_msg_completion(struct amd_i2c_dev *i2c_dev)
+static void i2c_amd_start_cmd(struct amd_i2c_dev *i2c_dev)
+{
+	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
+
+	reinit_completion(&i2c_dev->cmd_complete);
+	i2c_common->cmd_success = false;
+}
+
+static int i2c_amd_check_cmd_completion(struct amd_i2c_dev *i2c_dev)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 	unsigned long timeout;
 
-	timeout = wait_for_completion_timeout(&i2c_dev->msg_complete,
+	timeout = wait_for_completion_timeout(&i2c_dev->cmd_complete,
 					      AMD_I2C_TIMEOUT);
 	if (timeout == 0) {
 		dev_err(&i2c_dev->pdev->dev, "%s timed out\n",
@@ -86,7 +94,7 @@ static int i2c_amd_check_msg_completion(struct amd_i2c_dev *i2c_dev)
 	}
 
 	if (!i2c_common->cmd_success)
-		return -EINVAL;
+		return -EIO;
 
 	return 0;
 }
@@ -95,27 +103,25 @@ static int i2c_amd_xnable(struct amd_i2c_dev *i2c_dev, bool enable)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 
-	reinit_completion(&i2c_dev->msg_complete);
+	i2c_amd_start_cmd(i2c_dev);
 	amd_mp2_bus_xnable(i2c_common, enable);
 
-	return i2c_amd_check_msg_completion(i2c_dev);
+	return i2c_amd_check_cmd_completion(i2c_dev);
 }
 
 static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 
-	reinit_completion(&i2c_dev->msg_complete);
-
+	i2c_amd_start_cmd(i2c_dev);
 	i2c_common->msg = pmsg;
-	i2c_common->cmd_success = false;
 
 	if (pmsg->flags & I2C_M_RD)
 		amd_mp2_read(i2c_common);
 	else
 		amd_mp2_write(i2c_common);
 
-	return i2c_amd_check_msg_completion(i2c_dev);
+	return i2c_amd_check_cmd_completion(i2c_dev);
 }
 
 static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
@@ -124,6 +130,10 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	int i;
 	struct i2c_msg *pmsg;
 	int err;
+
+	/* the adapter might have been deleted while waiting for the bus lock */
+	if (unlikely(!i2c_dev->i2c_common.mp2_dev))
+		return -EINVAL;
 
 	amd_mp2_pm_runtime_get(i2c_dev->i2c_common.mp2_dev);
 
@@ -300,6 +310,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	}
 	dev_dbg(&pdev->dev, "bus id is %u\n", i2c_dev->i2c_common.bus_id);
 
+	i2c_dev->i2c_common.reqcmd = i2c_none;
 	if (amd_mp2_register_cb(&i2c_dev->i2c_common))
 		return -EINVAL;
 
@@ -318,7 +329,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 		 "AMD MP2 i2c bus %u", i2c_dev->i2c_common.bus_id);
 	i2c_set_adapdata(&i2c_dev->adapter, i2c_dev);
 
-	init_completion(&i2c_dev->msg_complete);
+	init_completion(&i2c_dev->cmd_complete);
 
 	/* enable the bus */
 	amd_mp2_pm_runtime_get(mp2_dev);
@@ -359,9 +370,8 @@ void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common)
 static int i2c_amd_remove(struct platform_device *pdev)
 {
 	struct amd_i2c_dev *i2c_dev = platform_get_drvdata(pdev);
-	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
 
-	i2c_amd_delete_adapter(i2c_common);
+	i2c_amd_delete_adapter(&i2c_dev->i2c_common);
 
 	return 0;
 }

@@ -217,7 +217,7 @@ static inline void amd_mp2_pm_runtime_put(struct amd_mp2_dev *mp2_dev)
 
 /* Platform driver */
 
-void i2c_amd_msg_completion(struct amd_i2c_common *i2c_common);
+void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common);
 void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common);
 
 #ifdef CONFIG_PM
