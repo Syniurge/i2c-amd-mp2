@@ -87,14 +87,12 @@ union i2c_cmd_base {
 	} s;
 };
 
-/* Response - Response of SFI */
 enum response_type {
 	invalid_response = 0,
 	command_success = 1,
 	command_failed = 2,
 };
 
-/* Status - Command ID to indicate a command */
 enum status_type {
 	i2c_readcomplete_event = 0,
 	i2c_readfail_event = 1,
@@ -154,7 +152,6 @@ struct amd_i2c_common {
 	union i2c_event eventval;
 	struct amd_mp2_dev *mp2_dev;
 	struct i2c_msg *msg;
-	struct delayed_work work;
 	enum i2c_cmd reqcmd;
 	u8 cmd_success;
 	u8 bus_id;
@@ -195,7 +192,9 @@ struct amd_mp2_dev {
 
 int amd_mp2_read(struct amd_i2c_common *i2c_common);
 int amd_mp2_write(struct amd_i2c_common *i2c_common);
-int amd_mp2_bus_xnable(struct amd_i2c_common *i2c_common, bool enable);
+int amd_mp2_bus_enable_set(struct amd_i2c_common *i2c_common, bool enable);
+
+void amd_mp2_process_event(struct amd_i2c_common *i2c_common);
 
 void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common);
 

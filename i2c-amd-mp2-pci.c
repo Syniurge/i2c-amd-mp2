@@ -72,7 +72,7 @@ static int amd_mp2_cmd(struct amd_i2c_common *i2c_common,
 	return 0;
 }
 
-int amd_mp2_bus_xnable(struct amd_i2c_common *i2c_common, bool enable)
+int amd_mp2_bus_enable_set(struct amd_i2c_common *i2c_common, bool enable)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 	union i2c_cmd_base i2c_cmd_base;
@@ -135,6 +135,10 @@ static int amd_mp2_dma_map(struct amd_mp2_dev *privdata,
 			i2c_common->dma_buf);
 		return -EIO;
 	}
+
+	dev_dbg(ndev_dev(privdata), "%s dma_addr: %llx size: %u dir: %s\n",
+		__func__, i2c_common->dma_addr, i2c_common->msg->len,
+		dma_direction == DMA_FROM_DEVICE ? "from" : "to");
 
 	return 0;
 }
@@ -238,12 +242,11 @@ static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 		i2c_common->cmd_success = true;
 }
 
-static void amd_mp2_pci_do_work(struct work_struct *work)
+static void __amd_mp2_process_event(struct amd_i2c_common *i2c_common)
 {
-	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-	int sts = i2c_common->eventval.r.status;
-	int res = i2c_common->eventval.r.response;
+	enum status_type sts = i2c_common->eventval.r.status;
+	enum response_type res = i2c_common->eventval.r.response;
 	int len = i2c_common->eventval.r.length;
 
 	if ((i2c_common->reqcmd == i2c_read ||
@@ -308,25 +311,20 @@ static void amd_mp2_pci_do_work(struct work_struct *work)
 	}
 }
 
-static void amd_mp2_pci_work(struct work_struct *work)
+void amd_mp2_process_event(struct amd_i2c_common *i2c_common)
 {
-	struct amd_i2c_common *i2c_common = work_amd_i2c_common(work);
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
 	if (unlikely(i2c_common->reqcmd == i2c_none)) {
 		dev_warn(ndev_dev(privdata),
-			"received irq with a message but no command was requested"
-			" (bus = %d)!\n", i2c_common->bus_id);
-		synchronize_irq(privdata->pci_dev->irq);
+			 "received msg but no cmd was sent (bus = %d)!\n",
+			 i2c_common->bus_id);
 		return;
 	}
 
-	amd_mp2_pci_do_work(work);
+	__amd_mp2_process_event(i2c_common);
 
 	i2c_common->reqcmd = i2c_none;
-	i2c_amd_cmd_completion(i2c_common);
-
-	synchronize_irq(privdata->pci_dev->irq);
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
 
@@ -349,11 +347,11 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 		val = readl(reg);
 		if (val != 0) {
 			writel(0, reg);
+			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 			i2c_common->eventval.ul = val;
-			schedule_delayed_work(&i2c_common->work, 0);
+			i2c_amd_cmd_completion(i2c_common);
 
 			ret = IRQ_HANDLED;
-			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 		}
 	}
 
@@ -361,9 +359,9 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 		val = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
 		if (unlikely(val != 0)) {
 			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
-			ret = IRQ_HANDLED;
 			dev_warn(ndev_dev(privdata),
 				 "received irq without message\n");
+			ret = IRQ_HANDLED;
 		}
 	}
 
@@ -372,10 +370,7 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 
 void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
 {
-	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-
 	i2c_common->reqcmd = i2c_none;
-	synchronize_irq(privdata->pci_dev->irq);
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
 
@@ -393,7 +388,6 @@ int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 	}
 
 	privdata->busses[i2c_common->bus_id] = i2c_common;
-	INIT_DELAYED_WORK(&i2c_common->work, amd_mp2_pci_work);
 
 	return 0;
 }
@@ -402,7 +396,6 @@ int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 
-	cancel_delayed_work_sync(&i2c_common->work);
 	privdata->busses[i2c_common->bus_id] = NULL;
 
 	return 0;

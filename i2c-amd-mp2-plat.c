@@ -29,14 +29,14 @@
  * @completion: xfer completion object
  */
 struct amd_i2c_dev {
-	struct amd_i2c_common i2c_common;
+	struct amd_i2c_common common;
 	struct platform_device *pdev;
-	struct i2c_adapter adapter;
+	struct i2c_adapter adap;
 	struct completion cmd_complete;
 };
 
 #define amd_i2c_dev_common(__common) \
-	container_of(__common, struct amd_i2c_dev, i2c_common)
+	container_of(__common, struct amd_i2c_dev, common)
 
 void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common)
 {
@@ -73,7 +73,7 @@ static const char *i2c_amd_cmd_name(enum i2c_cmd cmd)
 
 static void i2c_amd_start_cmd(struct amd_i2c_dev *i2c_dev)
 {
-	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
+	struct amd_i2c_common *i2c_common = &i2c_dev->common;
 
 	reinit_completion(&i2c_dev->cmd_complete);
 	i2c_common->cmd_success = false;
@@ -81,7 +81,7 @@ static void i2c_amd_start_cmd(struct amd_i2c_dev *i2c_dev)
 
 static int i2c_amd_check_cmd_completion(struct amd_i2c_dev *i2c_dev)
 {
-	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
+	struct amd_i2c_common *i2c_common = &i2c_dev->common;
 	unsigned long timeout;
 
 	timeout = wait_for_completion_timeout(&i2c_dev->cmd_complete,
@@ -93,25 +93,27 @@ static int i2c_amd_check_cmd_completion(struct amd_i2c_dev *i2c_dev)
 		return -ETIMEDOUT;
 	}
 
+	amd_mp2_process_event(i2c_common);
+
 	if (!i2c_common->cmd_success)
 		return -EIO;
 
 	return 0;
 }
 
-static int i2c_amd_xnable(struct amd_i2c_dev *i2c_dev, bool enable)
+static int i2c_amd_enable_set(struct amd_i2c_dev *i2c_dev, bool enable)
 {
-	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
+	struct amd_i2c_common *i2c_common = &i2c_dev->common;
 
 	i2c_amd_start_cmd(i2c_dev);
-	amd_mp2_bus_xnable(i2c_common, enable);
+	amd_mp2_bus_enable_set(i2c_common, enable);
 
 	return i2c_amd_check_cmd_completion(i2c_dev);
 }
 
 static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 {
-	struct amd_i2c_common *i2c_common = &i2c_dev->i2c_common;
+	struct amd_i2c_common *i2c_common = &i2c_dev->common;
 
 	i2c_amd_start_cmd(i2c_dev);
 	i2c_common->msg = pmsg;
@@ -132,10 +134,10 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	int err;
 
 	/* the adapter might have been deleted while waiting for the bus lock */
-	if (unlikely(!i2c_dev->i2c_common.mp2_dev))
+	if (unlikely(!i2c_dev->common.mp2_dev))
 		return -EINVAL;
 
-	amd_mp2_pm_runtime_get(i2c_dev->i2c_common.mp2_dev);
+	amd_mp2_pm_runtime_get(i2c_dev->common.mp2_dev);
 
 	for (i = 0; i < num; i++) {
 		pmsg = &msgs[i];
@@ -144,7 +146,7 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 			break;
 	}
 
-	amd_mp2_pm_runtime_put(i2c_dev->i2c_common.mp2_dev);
+	amd_mp2_pm_runtime_put(i2c_dev->common.mp2_dev);
 	return err ? err : num;
 }
 
@@ -163,7 +165,7 @@ int i2c_amd_suspend(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
-	i2c_amd_xnable(i2c_dev, false);
+	i2c_amd_enable_set(i2c_dev, false);
 	return 0;
 }
 
@@ -171,7 +173,7 @@ int i2c_amd_resume(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
-	return i2c_amd_xnable(i2c_dev, true);
+	return i2c_amd_enable_set(i2c_dev, true);
 }
 #endif
 
@@ -292,7 +294,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	if (!i2c_dev)
 		return -ENOMEM;
 
-	i2c_dev->i2c_common.mp2_dev = mp2_dev;
+	i2c_dev->common.mp2_dev = mp2_dev;
 	i2c_dev->pdev = pdev;
 	platform_set_drvdata(pdev, i2c_dev);
 
@@ -301,46 +303,47 @@ static int i2c_amd_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "missing UID/bus id!\n");
 		return -EINVAL;
 	} else if (strcmp(uid, "0") == 0) {
-		i2c_dev->i2c_common.bus_id = 0;
+		i2c_dev->common.bus_id = 0;
 	} else if (strcmp(uid, "1") == 0) {
-		i2c_dev->i2c_common.bus_id = 1;
+		i2c_dev->common.bus_id = 1;
 	} else {
 		dev_err(&pdev->dev, "incorrect UID/bus id \"%s\"!\n", uid);
 		return -EINVAL;
 	}
-	dev_dbg(&pdev->dev, "bus id is %u\n", i2c_dev->i2c_common.bus_id);
+	dev_dbg(&pdev->dev, "bus id is %u\n", i2c_dev->common.bus_id);
 
-	i2c_dev->i2c_common.reqcmd = i2c_none;
-	if (amd_mp2_register_cb(&i2c_dev->i2c_common))
+	/* register the adapter */
+	amd_mp2_pm_runtime_get(mp2_dev);
+
+	i2c_dev->common.reqcmd = i2c_none;
+	if (amd_mp2_register_cb(&i2c_dev->common))
 		return -EINVAL;
 
-	i2c_dev->i2c_common.i2c_speed = i2c_amd_get_bus_speed(pdev);
+	i2c_dev->common.i2c_speed = i2c_amd_get_bus_speed(pdev);
 
 	/* setup i2c adapter description */
-	i2c_dev->adapter.owner = THIS_MODULE;
-	i2c_dev->adapter.algo = &i2c_amd_algorithm;
-	i2c_dev->adapter.quirks = &amd_i2c_dev_quirks;
-	i2c_dev->adapter.dev.parent = &pdev->dev;
-	i2c_dev->adapter.algo_data = i2c_dev;
-	i2c_dev->adapter.nr = pdev->id;
-	ACPI_COMPANION_SET(&i2c_dev->adapter.dev, ACPI_COMPANION(&pdev->dev));
-	i2c_dev->adapter.dev.of_node = pdev->dev.of_node;
-	snprintf(i2c_dev->adapter.name, sizeof(i2c_dev->adapter.name),
-		 "AMD MP2 i2c bus %u", i2c_dev->i2c_common.bus_id);
-	i2c_set_adapdata(&i2c_dev->adapter, i2c_dev);
+	i2c_dev->adap.owner = THIS_MODULE;
+	i2c_dev->adap.algo = &i2c_amd_algorithm;
+	i2c_dev->adap.quirks = &amd_i2c_dev_quirks;
+	i2c_dev->adap.dev.parent = &pdev->dev;
+	i2c_dev->adap.algo_data = i2c_dev;
+	i2c_dev->adap.nr = pdev->id;
+	ACPI_COMPANION_SET(&i2c_dev->adap.dev, ACPI_COMPANION(&pdev->dev));
+	i2c_dev->adap.dev.of_node = pdev->dev.of_node;
+	snprintf(i2c_dev->adap.name, sizeof(i2c_dev->adap.name),
+		 "AMD MP2 i2c bus %u", i2c_dev->common.bus_id);
+	i2c_set_adapdata(&i2c_dev->adap, i2c_dev);
 
 	init_completion(&i2c_dev->cmd_complete);
 
 	/* enable the bus */
-	amd_mp2_pm_runtime_get(mp2_dev);
-
-	if (i2c_amd_xnable(i2c_dev, true))
+	if (i2c_amd_enable_set(i2c_dev, true))
 		dev_err(&pdev->dev, "initial bus enable failed\n");
 
-	amd_mp2_pm_runtime_put(mp2_dev);
-
 	/* attach to the i2c layer */
-	ret = i2c_add_numbered_adapter(&i2c_dev->adapter);
+	ret = i2c_add_numbered_adapter(&i2c_dev->adap);
+
+	amd_mp2_pm_runtime_put(mp2_dev);
 
 	if (ret < 0)
 		dev_err(&pdev->dev, "i2c add adapter failed = %d\n", ret);
@@ -352,26 +355,26 @@ void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
-	i2c_lock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+	i2c_lock_bus(&i2c_dev->adap, I2C_LOCK_ROOT_ADAPTER);
 	if (!i2c_common->mp2_dev) {
-		i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
+		i2c_unlock_bus(&i2c_dev->adap, I2C_LOCK_ROOT_ADAPTER);
 		return;
 	}
 
-	i2c_amd_xnable(i2c_dev, false);
+	i2c_amd_enable_set(i2c_dev, false);
 
 	amd_mp2_unregister_cb(i2c_common);
 
 	i2c_common->mp2_dev = NULL;
-	i2c_unlock_bus(&i2c_dev->adapter, I2C_LOCK_ROOT_ADAPTER);
-	i2c_del_adapter(&i2c_dev->adapter);
+	i2c_unlock_bus(&i2c_dev->adap, I2C_LOCK_ROOT_ADAPTER);
+	i2c_del_adapter(&i2c_dev->adap);
 }
 
 static int i2c_amd_remove(struct platform_device *pdev)
 {
 	struct amd_i2c_dev *i2c_dev = platform_get_drvdata(pdev);
 
-	i2c_amd_delete_adapter(&i2c_dev->i2c_common);
+	i2c_amd_delete_adapter(&i2c_dev->common);
 
 	return 0;
 }
