@@ -136,17 +136,16 @@ union i2c_event {
 /**
  * struct amd_i2c_common - per bus/i2c adapter context, shared
  *	between the pci and the platform driver
- * @eventval: MP2 event value set by the IRQ handler to be processed
- *	      by the worker
+ * @eventval: MP2 event value set by the IRQ handler
+ * @mp2_dev: MP2 pci device this adapter is part of
  * @msg: i2c message
- * @work: delayed worker struct
  * @reqcmd: requested i2c command type
  * @cmd_success: set to true if the MP2 responded to a command with
  *		 the expected status and response type
  * @bus_id: bus index
  * @i2c_speed: i2c bus speed determined by the slowest slave
+ * @dma_buf: if msg length > 32, holds the DMA buffer virtual address
  * @dma_addr: if msg length > 32, holds the DMA buffer address
- * @dma_direction: if msg length > 32, is either FROM or TO device
  */
 struct amd_i2c_common {
 	union i2c_event eventval;
@@ -201,7 +200,7 @@ void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common);
 int amd_mp2_register_cb(struct amd_i2c_common *i2c_common);
 int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common);
 
-struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate);
+struct amd_mp2_dev *amd_mp2_find_device(void);
 
 static inline void amd_mp2_pm_runtime_get(struct amd_mp2_dev *mp2_dev)
 {
@@ -217,7 +216,6 @@ static inline void amd_mp2_pm_runtime_put(struct amd_mp2_dev *mp2_dev)
 /* Platform driver */
 
 void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common);
-void i2c_amd_delete_adapter(struct amd_i2c_common *i2c_common);
 
 #ifdef CONFIG_PM
 int i2c_amd_suspend(struct amd_i2c_common *i2c_common);

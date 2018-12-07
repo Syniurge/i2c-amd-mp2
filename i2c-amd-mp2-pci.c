@@ -224,14 +224,14 @@ static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 	u32 slave_addr = i2c_common->eventval.r.slave_addr;
 	bool err = false;
 
-	if (len != i2c_common->msg->len) {
+	if (unlikely(len != i2c_common->msg->len)) {
 		dev_err(ndev_dev(privdata),
 			"length %d in event doesn't match buffer length %d!\n",
 			len, i2c_common->msg->len);
 		err = true;
 	}
 
-	if (slave_addr != i2c_common->msg->addr) {
+	if (unlikely(slave_addr != i2c_common->msg->addr)) {
 		dev_err(ndev_dev(privdata),
 			"unexpected slave address %x (expected: %x)!\n",
 			slave_addr, i2c_common->msg->addr);
@@ -408,28 +408,21 @@ static struct dentry *debugfs_root_dir;
 static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 				    size_t count, loff_t *offp)
 {
-	struct amd_mp2_dev *privdata;
-	void __iomem *mmio;
+	struct amd_mp2_dev *privdata = filp->private_data;
+	void __iomem *mmio = privdata->mmio;
 	u8 *buf;
-	size_t buf_size;
+	size_t buf_size = min_t(size_t, count, 0x800);
 	ssize_t ret, off = 0;
 	u32 v32;
 	int i;
 
-	privdata = filp->private_data;
-	mmio = privdata->mmio;
-	buf_size = min_t(size_t, count, 0x800);
 	buf = kmalloc(buf_size, GFP_KERNEL);
-
 	if (!buf)
 		return -ENOMEM;
 
 	off += scnprintf(buf + off, buf_size - off,
-			 "MP2 Device Information:\n");
-
-	off += scnprintf(buf + off, buf_size - off,
-			 "========================\n");
-	off += scnprintf(buf + off, buf_size - off,
+			 "MP2 Device Information:\n"
+			 "========================\n"
 			 "\tMP2 C2P Message Register Dump:\n\n");
 
 	for (i = 0; i < 10; i++) {
@@ -590,11 +583,6 @@ static bool amd_mp2_pci_is_probed(struct pci_dev *pci_dev)
 static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 {
 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
-	unsigned int bus_id;
-
-	for (bus_id = 0; bus_id < 2; bus_id++)
-		if (privdata->busses[bus_id])
-			i2c_amd_delete_adapter(privdata->busses[bus_id]);
 
 	pm_runtime_forbid(&pci_dev->dev);
 	pm_runtime_get_noresume(&pci_dev->dev);
@@ -681,19 +669,15 @@ static struct pci_driver amd_mp2_pci_driver = {
 
 static int amd_mp2_device_match(struct device *dev, void *data)
 {
-	struct pci_dev *candidate = data;
-
-	if (!candidate)
-		return 1;
-	return (to_pci_dev(dev) == candidate) ? 1 : 0;
+	return 1;
 }
 
-struct amd_mp2_dev *amd_mp2_find_device(struct pci_dev *candidate)
+struct amd_mp2_dev *amd_mp2_find_device(void)
 {
 	struct device *dev;
 	struct pci_dev *pci_dev;
 
-	dev = driver_find_device(&amd_mp2_pci_driver.driver, NULL, candidate,
+	dev = driver_find_device(&amd_mp2_pci_driver.driver, NULL, NULL,
 				 amd_mp2_device_match);
 	if (!dev)
 		return NULL;
