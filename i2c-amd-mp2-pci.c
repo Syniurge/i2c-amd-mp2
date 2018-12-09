@@ -136,10 +136,6 @@ static int amd_mp2_dma_map(struct amd_mp2_dev *privdata,
 		return -EIO;
 	}
 
-	dev_dbg(ndev_dev(privdata), "%s dma_addr: %llx size: %u dir: %s\n",
-		__func__, i2c_common->dma_addr, i2c_common->msg->len,
-		dma_direction == DMA_FROM_DEVICE ? "from" : "to");
-
 	return 0;
 }
 
@@ -409,9 +405,8 @@ static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
 				    size_t count, loff_t *offp)
 {
 	struct amd_mp2_dev *privdata = filp->private_data;
-	void __iomem *mmio = privdata->mmio;
-	u8 *buf;
 	size_t buf_size = min_t(size_t, count, 0x800);
+	u8 *buf;
 	ssize_t ret, off = 0;
 	u32 v32;
 	int i;
