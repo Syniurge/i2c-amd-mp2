@@ -38,17 +38,68 @@ struct amd_i2c_dev {
 #define amd_i2c_dev_common(__common) \
 	container_of(__common, struct amd_i2c_dev, common)
 
-static void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common)
+#ifndef i2c_get_dma_safe_msg_buf
+// DKMS only, for kernels older than 4.16, assume msg->buf to be DMA safe since
+// I2C_M_DMA_SAFE wasn't introduced either
+u8 *i2c_get_dma_safe_msg_buf(struct i2c_msg *msg, unsigned int threshold)
 {
+	/* ... */
+
+	/* if (msg->flags & I2C_M_DMA_SAFE) */
+		return msg->buf;
+
+	/* ... */
+}
+#endif
+
+static int i2c_amd_dma_map(struct amd_i2c_common *i2c_common)
+{
+	struct device *dev_pci = &i2c_common->mp2_dev->pci_dev->dev;
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
-	union i2c_event *event = &i2c_common->eventval;
+	enum dma_data_direction dma_direction =
+			i2c_common->msg->flags & I2C_M_RD ?
+			DMA_FROM_DEVICE : DMA_TO_DEVICE;
 
-	if (event->r.status == i2c_readcomplete_event)
-		dev_dbg(&i2c_dev->pdev->dev, "%s readdata:%*ph\n",
-			__func__, event->r.length,
-			i2c_common->msg->buf);
+	i2c_common->dma_buf = i2c_get_dma_safe_msg_buf(i2c_common->msg, 0);
+	i2c_common->dma_addr = dma_map_single(dev_pci, i2c_common->dma_buf,
+					      i2c_common->msg->len,
+					      dma_direction);
 
-	complete(&i2c_dev->cmd_complete);
+	if (unlikely(dma_mapping_error(dev_pci, i2c_common->dma_addr))) {
+		dev_err(&i2c_dev->pdev->dev,
+			"Error while mapping dma buffer %p\n",
+			i2c_common->dma_buf);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+#ifndef i2c_put_dma_safe_msg_buf
+// DKMS only, for kernels older than 4.19
+void i2c_put_dma_safe_msg_buf(u8 *buf, struct i2c_msg *msg, bool xferred)
+{
+	if (!buf || buf == msg->buf)
+		return;
+
+	if (xferred && msg->flags & I2C_M_RD)
+		memcpy(msg->buf, buf, msg->len);
+
+	kfree(buf);
+}
+#endif
+
+static void i2c_amd_dma_unmap(struct amd_i2c_common *i2c_common)
+{
+	struct device *dev_pci = &i2c_common->mp2_dev->pci_dev->dev;
+	enum dma_data_direction dma_direction =
+			i2c_common->msg->flags & I2C_M_RD ?
+			DMA_FROM_DEVICE : DMA_TO_DEVICE;
+
+	dma_unmap_single(dev_pci, i2c_common->dma_addr,
+			 i2c_common->msg->len, dma_direction);
+
+	i2c_put_dma_safe_msg_buf(i2c_common->dma_buf, i2c_common->msg, true);
 }
 
 static const char *i2c_amd_cmd_name(enum i2c_cmd cmd)
@@ -79,6 +130,19 @@ static void i2c_amd_start_cmd(struct amd_i2c_dev *i2c_dev)
 	i2c_common->cmd_success = false;
 }
 
+static void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common)
+{
+	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
+	union i2c_event *event = &i2c_common->eventval;
+
+	if (event->r.status == i2c_readcomplete_event)
+		dev_dbg(&i2c_dev->pdev->dev, "%s readdata:%*ph\n",
+			__func__, event->r.length,
+			i2c_common->msg->buf);
+
+	complete(&i2c_dev->cmd_complete);
+}
+
 static int i2c_amd_check_cmd_completion(struct amd_i2c_dev *i2c_dev)
 {
 	struct amd_i2c_common *i2c_common = &i2c_dev->common;
@@ -86,12 +150,19 @@ static int i2c_amd_check_cmd_completion(struct amd_i2c_dev *i2c_dev)
 
 	timeout = wait_for_completion_timeout(&i2c_dev->cmd_complete,
 					      i2c_dev->adap.timeout);
-	if (timeout == 0) {
+	if (unlikely(timeout == 0)) {
 		dev_err(&i2c_dev->pdev->dev, "%s timed out\n",
 			i2c_amd_cmd_name(i2c_common->reqcmd));
 		amd_mp2_rw_timeout(i2c_common);
-		return -ETIMEDOUT;
 	}
+
+	if ((i2c_common->reqcmd == i2c_read ||
+	     i2c_common->reqcmd == i2c_write) &&
+	    i2c_common->msg->len > 32)
+		i2c_amd_dma_unmap(i2c_common);
+
+	if (unlikely(timeout == 0))
+		return -ETIMEDOUT;
 
 	amd_mp2_process_event(i2c_common);
 
@@ -117,6 +188,10 @@ static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 
 	i2c_amd_start_cmd(i2c_dev);
 	i2c_common->msg = pmsg;
+
+	if (pmsg->len > 32)
+		if (i2c_amd_dma_map(i2c_common))
+			return -EIO;
 
 	if (pmsg->flags & I2C_M_RD)
 		amd_mp2_read(i2c_common);

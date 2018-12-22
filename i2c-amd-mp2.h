@@ -140,7 +140,7 @@ union i2c_event {
  * @mp2_dev: MP2 pci device this adapter is part of
  * @msg: i2c message
  * @cmd_completion: function called by the IRQ handler to signal
- * 		    the platform driver
+ *		    the platform driver
  * @reqcmd: requested i2c command type
  * @cmd_success: set to true if the MP2 responded to a command with
  *		 the expected status and response type
