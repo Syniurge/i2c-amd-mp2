@@ -38,7 +38,7 @@ struct amd_i2c_dev {
 #define amd_i2c_dev_common(__common) \
 	container_of(__common, struct amd_i2c_dev, common)
 
-void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common)
+static void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 	union i2c_event *event = &i2c_common->eventval;
@@ -161,7 +161,7 @@ static const struct i2c_algorithm i2c_amd_algorithm = {
 };
 
 #ifdef CONFIG_PM
-int i2c_amd_suspend(struct amd_i2c_common *i2c_common)
+static int i2c_amd_suspend(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
@@ -169,7 +169,7 @@ int i2c_amd_suspend(struct amd_i2c_common *i2c_common)
 	return 0;
 }
 
-int i2c_amd_resume(struct amd_i2c_common *i2c_common)
+static int i2c_amd_resume(struct amd_i2c_common *i2c_common)
 {
 	struct amd_i2c_dev *i2c_dev = amd_i2c_dev_common(i2c_common);
 
@@ -247,6 +247,10 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	i2c_dev->common.mp2_dev = mp2_dev;
 	i2c_dev->pdev = pdev;
 	platform_set_drvdata(pdev, i2c_dev);
+
+	i2c_dev->common.cmd_completion = &i2c_amd_cmd_completion;
+	i2c_dev->common.suspend = &i2c_amd_suspend;
+	i2c_dev->common.resume = &i2c_amd_resume;
 
 	uid = adev->pnp.unique_id;
 	if (!uid) {
@@ -335,13 +339,10 @@ static struct platform_driver i2c_amd_plat_driver = {
 		.acpi_match_table = ACPI_PTR(i2c_amd_acpi_match),
 	},
 };
+module_platform_driver(i2c_amd_plat_driver);
 
-int i2c_amd_register_driver(void)
-{
-	return platform_driver_register(&i2c_amd_plat_driver);
-}
-
-void i2c_amd_unregister_driver(void)
-{
-	platform_driver_unregister(&i2c_amd_plat_driver);
-}
+MODULE_DESCRIPTION("AMD(R) MP2 I2C Platform Driver");
+MODULE_VERSION("1.0");
+MODULE_AUTHOR("Nehal Shah <nehal-bakulchandra.shah@amd.com>");
+MODULE_AUTHOR("Elie Morisse <syniurge@gmail.com>");
+MODULE_LICENSE("Dual BSD/GPL");

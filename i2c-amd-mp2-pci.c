@@ -89,6 +89,7 @@ int amd_mp2_bus_enable_set(struct amd_i2c_common *i2c_common, bool enable)
 
 	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
 }
+EXPORT_SYMBOL_GPL(amd_mp2_bus_enable_set);
 
 static void amd_mp2_cmd_rw_fill(struct amd_i2c_common *i2c_common,
 				union i2c_cmd_base *i2c_cmd_base,
@@ -202,6 +203,7 @@ int amd_mp2_read(struct amd_i2c_common *i2c_common)
 
 	return amd_mp2_rw(i2c_common, i2c_read);
 }
+EXPORT_SYMBOL_GPL(amd_mp2_read);
 
 int amd_mp2_write(struct amd_i2c_common *i2c_common)
 {
@@ -212,6 +214,7 @@ int amd_mp2_write(struct amd_i2c_common *i2c_common)
 
 	return amd_mp2_rw(i2c_common, i2c_write);
 }
+EXPORT_SYMBOL_GPL(amd_mp2_write);
 
 static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 {
@@ -323,6 +326,7 @@ void amd_mp2_process_event(struct amd_i2c_common *i2c_common)
 	i2c_common->reqcmd = i2c_none;
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
+EXPORT_SYMBOL_GPL(amd_mp2_process_event);
 
 static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 {
@@ -345,7 +349,7 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 			writel(0, reg);
 			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 			i2c_common->eventval.ul = val;
-			i2c_amd_cmd_completion(i2c_common);
+			i2c_common->cmd_completion(i2c_common);
 
 			ret = IRQ_HANDLED;
 		}
@@ -369,6 +373,7 @@ void amd_mp2_rw_timeout(struct amd_i2c_common *i2c_common)
 	i2c_common->reqcmd = i2c_none;
 	amd_mp2_c2p_mutex_unlock(i2c_common);
 }
+EXPORT_SYMBOL_GPL(amd_mp2_rw_timeout);
 
 int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 {
@@ -387,6 +392,7 @@ int amd_mp2_register_cb(struct amd_i2c_common *i2c_common)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(amd_mp2_register_cb);
 
 int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common)
 {
@@ -396,6 +402,7 @@ int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(amd_mp2_unregister_cb);
 
 #ifdef CONFIG_DEBUG_FS
 static const struct file_operations amd_mp2_debugfs_info;
@@ -597,12 +604,15 @@ static int amd_mp2_pci_suspend(struct device *dev)
 {
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+	struct amd_i2c_common *i2c_common;
 	unsigned int bus_id;
 	int ret = 0;
 
-	for (bus_id = 0; bus_id < 2; bus_id++)
-		if (privdata->busses[bus_id])
-			i2c_amd_suspend(privdata->busses[bus_id]);
+	for (bus_id = 0; bus_id < 2; bus_id++) {
+		i2c_common = privdata->busses[bus_id];
+		if (i2c_common)
+			i2c_common->suspend(i2c_common);
+	}
 
 	ret = pci_save_state(pci_dev);
 	if (ret) {
@@ -619,6 +629,7 @@ static int amd_mp2_pci_resume(struct device *dev)
 {
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
+	struct amd_i2c_common *i2c_common;
 	unsigned int bus_id;
 	int ret = 0;
 
@@ -630,12 +641,14 @@ static int amd_mp2_pci_resume(struct device *dev)
 		return ret;
 	}
 
-	for (bus_id = 0; bus_id < 2; bus_id++)
-		if (privdata->busses[bus_id]) {
-			ret = i2c_amd_resume(privdata->busses[bus_id]);
+	for (bus_id = 0; bus_id < 2; bus_id++) {
+		i2c_common = privdata->busses[bus_id];
+		if (i2c_common) {
+			ret = i2c_common->resume(i2c_common);
 			if (ret < 0)
 				return ret;
 		}
+	}
 
 	return ret;
 }
@@ -682,25 +695,20 @@ struct amd_mp2_dev *amd_mp2_find_device(void)
 		return NULL;
 	return (struct amd_mp2_dev *)pci_get_drvdata(pci_dev);
 }
+EXPORT_SYMBOL_GPL(amd_mp2_find_device);
 
 static int __init amd_mp2_drv_init(void)
 {
-	int rc;
-
 #ifdef CONFIG_DEBUG_FS
 	debugfs_root_dir = debugfs_create_dir(KBUILD_MODNAME, NULL);
 #endif /* CONFIG_DEBUG_FS */
 
-	rc = pci_register_driver(&amd_mp2_pci_driver);
-	if (rc)
-		return rc;
-	return i2c_amd_register_driver();
+	return pci_register_driver(&amd_mp2_pci_driver);
 }
 module_init(amd_mp2_drv_init);
 
 static void __exit amd_mp2_drv_exit(void)
 {
-	i2c_amd_unregister_driver();
 	pci_unregister_driver(&amd_mp2_pci_driver);
 
 #ifdef CONFIG_DEBUG_FS
@@ -712,6 +720,5 @@ module_exit(amd_mp2_drv_exit);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_VERSION(DRIVER_VER);
 MODULE_AUTHOR("Shyam Sundar S K <Shyam-sundar.S-k@amd.com>");
-MODULE_AUTHOR("Nehal Shah <nehal-bakulchandra.shah@amd.com>");
 MODULE_AUTHOR("Elie Morisse <syniurge@gmail.com>");
 MODULE_LICENSE("Dual BSD/GPL");

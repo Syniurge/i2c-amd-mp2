@@ -139,6 +139,8 @@ union i2c_event {
  * @eventval: MP2 event value set by the IRQ handler
  * @mp2_dev: MP2 pci device this adapter is part of
  * @msg: i2c message
+ * @cmd_completion: function called by the IRQ handler to signal
+ * 		    the platform driver
  * @reqcmd: requested i2c command type
  * @cmd_success: set to true if the MP2 responded to a command with
  *		 the expected status and response type
@@ -151,12 +153,17 @@ struct amd_i2c_common {
 	union i2c_event eventval;
 	struct amd_mp2_dev *mp2_dev;
 	struct i2c_msg *msg;
+	void (*cmd_completion)(struct amd_i2c_common *i2c_common);
 	enum i2c_cmd reqcmd;
 	u8 cmd_success;
 	u8 bus_id;
 	enum speed_enum i2c_speed;
 	u8 *dma_buf;
 	dma_addr_t dma_addr;
+#ifdef CONFIG_PM
+	int (*suspend)(struct amd_i2c_common *i2c_common);
+	int (*resume)(struct amd_i2c_common *i2c_common);
+#endif /* CONFIG_PM */
 };
 
 /**
@@ -212,17 +219,5 @@ static inline void amd_mp2_pm_runtime_put(struct amd_mp2_dev *mp2_dev)
 	pm_runtime_mark_last_busy(&mp2_dev->pci_dev->dev);
 	pm_runtime_put_autosuspend(&mp2_dev->pci_dev->dev);
 }
-
-/* Platform driver */
-
-void i2c_amd_cmd_completion(struct amd_i2c_common *i2c_common);
-
-#ifdef CONFIG_PM
-int i2c_amd_suspend(struct amd_i2c_common *i2c_common);
-int i2c_amd_resume(struct amd_i2c_common *i2c_common);
-#endif /* CONFIG_PM */
-
-int i2c_amd_register_driver(void);
-void i2c_amd_unregister_driver(void);
 
 #endif
