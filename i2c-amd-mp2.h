@@ -182,10 +182,7 @@ struct amd_mp2_dev {
 	void __iomem *mmio;
 	struct mutex c2p_lock;
 	u8 c2p_lock_busid;
-#ifdef CONFIG_DEBUG_FS
-	struct dentry *debugfs_dir;
-	struct dentry *debugfs_info;
-#endif /* CONFIG_DEBUG_FS */
+	bool probed;
 };
 
 #define ndev_pdev(ndev) ((ndev)->pci_dev)
@@ -196,8 +193,7 @@ struct amd_mp2_dev {
 
 /* PCIe communication driver */
 
-int amd_mp2_read(struct amd_i2c_common *i2c_common);
-int amd_mp2_write(struct amd_i2c_common *i2c_common);
+int amd_mp2_rw(struct amd_i2c_common *i2c_common, enum i2c_cmd reqcmd);
 int amd_mp2_bus_enable_set(struct amd_i2c_common *i2c_common, bool enable);
 
 void amd_mp2_process_event(struct amd_i2c_common *i2c_common);

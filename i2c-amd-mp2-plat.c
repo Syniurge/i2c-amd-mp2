@@ -150,19 +150,16 @@ static int i2c_amd_check_cmd_completion(struct amd_i2c_dev *i2c_dev)
 
 	timeout = wait_for_completion_timeout(&i2c_dev->cmd_complete,
 					      i2c_dev->adap.timeout);
-	if (unlikely(timeout == 0)) {
-		dev_err(&i2c_dev->pdev->dev, "%s timed out\n",
-			i2c_amd_cmd_name(i2c_common->reqcmd));
-		amd_mp2_rw_timeout(i2c_common);
-	}
 
 	if ((i2c_common->reqcmd == i2c_read ||
 	     i2c_common->reqcmd == i2c_write) &&
 	    i2c_common->msg->len > 32)
 		i2c_amd_dma_unmap(i2c_common);
 
-	if (unlikely(timeout == 0))
+	if (timeout == 0) {
+		amd_mp2_rw_timeout(i2c_common);
 		return -ETIMEDOUT;
+	}
 
 	amd_mp2_process_event(i2c_common);
 
@@ -194,9 +191,9 @@ static int i2c_amd_xfer_msg(struct amd_i2c_dev *i2c_dev, struct i2c_msg *pmsg)
 			return -EIO;
 
 	if (pmsg->flags & I2C_M_RD)
-		amd_mp2_read(i2c_common);
+		amd_mp2_rw(i2c_common, i2c_read);
 	else
-		amd_mp2_write(i2c_common);
+		amd_mp2_rw(i2c_common, i2c_write);
 
 	return i2c_amd_check_cmd_completion(i2c_dev);
 }
@@ -227,7 +224,7 @@ static int i2c_amd_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 
 static u32 i2c_amd_func(struct i2c_adapter *a)
 {
-	return I2C_FUNC_I2C;
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
 }
 
 static const struct i2c_algorithm i2c_amd_algorithm = {
@@ -311,8 +308,8 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	 * only one MP2 PCI device per system.
 	 */
 	mp2_dev = amd_mp2_find_device();
-	if (!mp2_dev)
-		/* The MP2 PCI device might get probed later */
+	if (!mp2_dev || !mp2_dev->probed)
+		/* The MP2 PCI device should get probed later */
 		return -EPROBE_DEFER;
 
 	i2c_dev = devm_kzalloc(&pdev->dev, sizeof(*i2c_dev), GFP_KERNEL);
@@ -360,7 +357,6 @@ static int i2c_amd_probe(struct platform_device *pdev)
 	i2c_dev->adap.quirks = &amd_i2c_dev_quirks;
 	i2c_dev->adap.dev.parent = &pdev->dev;
 	i2c_dev->adap.algo_data = i2c_dev;
-	i2c_dev->adap.nr = pdev->id;
 	i2c_dev->adap.timeout = AMD_I2C_TIMEOUT;
 	ACPI_COMPANION_SET(&i2c_dev->adap.dev, ACPI_COMPANION(&pdev->dev));
 	i2c_dev->adap.dev.of_node = pdev->dev.of_node;
@@ -375,7 +371,7 @@ static int i2c_amd_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "initial bus enable failed\n");
 
 	/* Attach to the i2c layer */
-	ret = i2c_add_numbered_adapter(&i2c_dev->adap);
+	ret = i2c_add_adapter(&i2c_dev->adap);
 
 	amd_mp2_pm_runtime_put(mp2_dev);
 
@@ -419,7 +415,6 @@ static struct platform_driver i2c_amd_plat_driver = {
 module_platform_driver(i2c_amd_plat_driver);
 
 MODULE_DESCRIPTION("AMD(R) MP2 I2C Platform Driver");
-MODULE_VERSION("1.0");
 MODULE_AUTHOR("Nehal Shah <nehal-bakulchandra.shah@amd.com>");
 MODULE_AUTHOR("Elie Morisse <syniurge@gmail.com>");
 MODULE_LICENSE("Dual BSD/GPL");

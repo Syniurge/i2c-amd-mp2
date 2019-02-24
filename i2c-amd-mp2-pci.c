@@ -6,7 +6,6 @@
  *          Elie Morisse <syniurge@gmail.com>
  */
 
-#include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
@@ -18,21 +17,6 @@
 #define DRIVER_NAME	"i2c_amd_mp2"
 #define DRIVER_DESC	"AMD(R) PCI-E MP2 I2C Controller Driver"
 #define DRIVER_VER	"1.0"
-
-static inline void write64(u64 val, void __iomem *mmio)
-{
-	writel(val, mmio);
-	writel(val >> 32, mmio + sizeof(u32));
-}
-
-static inline u64 read64(void __iomem *mmio)
-{
-	u64 low, high;
-
-	low = readl(mmio);
-	high = readl(mmio + sizeof(u32));
-	return low | (high << 32);
-}
 
 static void amd_mp2_c2p_mutex_lock(struct amd_i2c_common *i2c_common)
 {
@@ -102,7 +86,7 @@ static void amd_mp2_cmd_rw_fill(struct amd_i2c_common *i2c_common,
 	i2c_cmd_base->s.length = i2c_common->msg->len;
 }
 
-static int amd_mp2_rw(struct amd_i2c_common *i2c_common, enum i2c_cmd reqcmd)
+int amd_mp2_rw(struct amd_i2c_common *i2c_common, enum i2c_cmd reqcmd)
 {
 	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
 	union i2c_cmd_base i2c_cmd_base;
@@ -118,34 +102,13 @@ static int amd_mp2_rw(struct amd_i2c_common *i2c_common, enum i2c_cmd reqcmd)
 				    i2c_common->msg->len);
 	} else {
 		i2c_cmd_base.s.mem_type = use_dram;
-		write64((u64)i2c_common->dma_addr,
-			privdata->mmio + AMD_C2P_MSG2);
+		writeq((u64)i2c_common->dma_addr,
+		       privdata->mmio + AMD_C2P_MSG2);
 	}
 
 	return amd_mp2_cmd(i2c_common, i2c_cmd_base);
 }
-
-int amd_mp2_read(struct amd_i2c_common *i2c_common)
-{
-	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-
-	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
-		i2c_common->msg->addr, i2c_common->bus_id);
-
-	return amd_mp2_rw(i2c_common, i2c_read);
-}
-EXPORT_SYMBOL_GPL(amd_mp2_read);
-
-int amd_mp2_write(struct amd_i2c_common *i2c_common)
-{
-	struct amd_mp2_dev *privdata = i2c_common->mp2_dev;
-
-	dev_dbg(ndev_dev(privdata), "%s addr: %x id: %d\n", __func__,
-		i2c_common->msg->addr, i2c_common->bus_id);
-
-	return amd_mp2_rw(i2c_common, i2c_write);
-}
-EXPORT_SYMBOL_GPL(amd_mp2_write);
+EXPORT_SYMBOL_GPL(amd_mp2_rw);
 
 static void amd_mp2_pci_check_rw_event(struct amd_i2c_common *i2c_common)
 {
@@ -180,9 +143,7 @@ static void __amd_mp2_process_event(struct amd_i2c_common *i2c_common)
 	int len = i2c_common->eventval.r.length;
 
 	if (res != command_success) {
-		if (res == command_failed)
-			dev_err(ndev_dev(privdata), "i2c command failed!\n");
-		else
+		if (res != command_failed)
 			dev_err(ndev_dev(privdata), "invalid response to i2c command!\n");
 		return;
 	}
@@ -194,10 +155,8 @@ static void __amd_mp2_process_event(struct amd_i2c_common *i2c_common)
 			if (len <= 32)
 				memcpy_fromio(i2c_common->msg->buf,
 					      privdata->mmio + AMD_C2P_MSG2,
-					      i2c_common->msg->len);
-		} else if (sts == i2c_readfail_event) {
-			dev_err(ndev_dev(privdata), "i2c read failed!\n");
-		} else {
+					      len);
+		} else if (sts != i2c_readfail_event) {
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after read (%d)!\n", sts);
 		}
@@ -205,31 +164,23 @@ static void __amd_mp2_process_event(struct amd_i2c_common *i2c_common)
 	case i2c_write:
 		if (sts == i2c_writecomplete_event)
 			amd_mp2_pci_check_rw_event(i2c_common);
-		else if (sts == i2c_writefail_event)
-			dev_err(ndev_dev(privdata), "i2c write failed!\n");
-		else
+		else if (sts != i2c_writefail_event)
 			dev_err(ndev_dev(privdata),
 				"invalid i2c status after write (%d)!\n", sts);
 		break;
 	case i2c_enable:
-		if (sts == i2c_busenable_failed)
-			dev_err(ndev_dev(privdata), "i2c bus enable failed!\n");
-		else if (sts != i2c_busenable_complete)
-			dev_err(ndev_dev(privdata),
-				"invalid i2c status after bus enable (%d)!\n",
-				sts);
-		else
+		if (sts == i2c_busenable_complete)
 			i2c_common->cmd_success = true;
+		else if (sts != i2c_busenable_failed)
+			dev_err(ndev_dev(privdata),
+				"invalid i2c status after bus enable (%d)!\n", sts);
 		break;
 	case i2c_disable:
-		if (sts == i2c_busdisable_failed)
-			dev_err(ndev_dev(privdata), "i2c bus disable failed!\n");
-		else if (sts != i2c_busdisable_complete)
-			dev_err(ndev_dev(privdata),
-				"invalid i2c status after bus disable (%d)!\n",
-				sts);
-		else
+		if (sts == i2c_busdisable_complete)
 			i2c_common->cmd_success = true;
+		else if (sts != i2c_busdisable_failed)
+			dev_err(ndev_dev(privdata),
+				"invalid i2c status after bus disable (%d)!\n", sts);
 		break;
 	default:
 		break;
@@ -283,7 +234,7 @@ static irqreturn_t amd_mp2_irq_isr(int irq, void *dev)
 
 	if (ret != IRQ_HANDLED) {
 		val = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
-		if (unlikely(val != 0)) {
+		if (val != 0) {
 			writel(0, privdata->mmio + AMD_P2C_MSG_INTEN);
 			dev_warn(ndev_dev(privdata),
 				 "received irq without message\n");
@@ -329,80 +280,6 @@ int amd_mp2_unregister_cb(struct amd_i2c_common *i2c_common)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(amd_mp2_unregister_cb);
-
-#ifdef CONFIG_DEBUG_FS
-static const struct file_operations amd_mp2_debugfs_info;
-static struct dentry *debugfs_root_dir;
-
-static ssize_t amd_mp2_debugfs_read(struct file *filp, char __user *ubuf,
-				    size_t count, loff_t *offp)
-{
-	struct amd_mp2_dev *privdata = filp->private_data;
-	size_t buf_size = min_t(size_t, count, 0x800);
-	u8 *buf;
-	ssize_t ret, off = 0;
-	u32 v32;
-	int i;
-
-	buf = kmalloc(buf_size, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	off += scnprintf(buf + off, buf_size - off,
-			 "MP2 Device Information:\n"
-			 "========================\n"
-			 "\tMP2 C2P Message Register Dump:\n\n");
-
-	for (i = 0; i < 10; i++) {
-		v32 = readl(privdata->mmio + AMD_C2P_MSG0 + i * 4);
-		off += scnprintf(buf + off, buf_size - off,
-				 "AMD_C2P_MSG%d -\t\t\t%#06x\n", i, v32);
-	}
-
-	off += scnprintf(buf + off, buf_size - off,
-			"\n\tMP2 P2C Message Register Dump:\n\n");
-
-	for (i = 0; i < 3; i++) {
-		v32 = readl(privdata->mmio + AMD_P2C_MSG1 + i * 4);
-		off += scnprintf(buf + off, buf_size - off,
-				 "AMD_P2C_MSG%d -\t\t\t%#06x\n", i + 1, v32);
-	}
-
-	v32 = readl(privdata->mmio + AMD_P2C_MSG_INTEN);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_P2C_MSG_INTEN -\t\t%#06x\n", v32);
-
-	v32 = readl(privdata->mmio + AMD_P2C_MSG_INTSTS);
-	off += scnprintf(buf + off, buf_size - off,
-			"AMD_P2C_MSG_INTSTS -\t\t%#06x\n", v32);
-
-	ret = simple_read_from_buffer(ubuf, count, offp, buf, off);
-	kfree(buf);
-	return ret;
-}
-
-static const struct file_operations amd_mp2_debugfs_info = {
-	.owner = THIS_MODULE,
-	.open = simple_open,
-	.read = amd_mp2_debugfs_read,
-};
-
-static void amd_mp2_init_debugfs(struct amd_mp2_dev *privdata)
-{
-	if (!debugfs_root_dir)
-		return;
-
-	privdata->debugfs_dir = debugfs_create_dir(ndev_name(privdata),
-						   debugfs_root_dir);
-	if (!privdata->debugfs_dir) {
-		privdata->debugfs_info = NULL;
-	} else {
-		privdata->debugfs_info = debugfs_create_file
-			("info", 0400, privdata->debugfs_dir,
-			 privdata, &amd_mp2_debugfs_info);
-	}
-}
-#endif /* CONFIG_DEBUG_FS */
 
 static void amd_mp2_clear_reg(struct amd_mp2_dev *privdata)
 {
@@ -467,16 +344,6 @@ static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
 {
 	struct amd_mp2_dev *privdata;
 	int rc;
-	static bool first_probe = true;
-
-	if (first_probe) {
-		pr_info("%s: %s Version: %s\n", DRIVER_NAME,
-			DRIVER_DESC, DRIVER_VER);
-		first_probe = false;
-	}
-
-	dev_info(&pci_dev->dev, "MP2 device found [%04x:%04x] (rev %x)\n",
-		 pci_dev->vendor, pci_dev->device, pci_dev->revision);
 
 	privdata = devm_kzalloc(&pci_dev->dev, sizeof(*privdata), GFP_KERNEL);
 	if (!privdata)
@@ -494,18 +361,10 @@ static int amd_mp2_pci_probe(struct pci_dev *pci_dev,
 	pm_runtime_put_autosuspend(&pci_dev->dev);
 	pm_runtime_allow(&pci_dev->dev);
 
-	amd_mp2_init_debugfs(privdata);
+	privdata->probed = true;
+
 	dev_info(&pci_dev->dev, "MP2 device registered.\n");
 	return 0;
-}
-
-static bool amd_mp2_pci_is_probed(struct pci_dev *pci_dev)
-{
-	struct amd_mp2_dev *privdata = pci_get_drvdata(pci_dev);
-
-	if (!privdata)
-		return false;
-	return privdata->pci_dev != NULL;
 }
 
 static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
@@ -514,10 +373,6 @@ static void amd_mp2_pci_remove(struct pci_dev *pci_dev)
 
 	pm_runtime_forbid(&pci_dev->dev);
 	pm_runtime_get_noresume(&pci_dev->dev);
-
-#ifdef CONFIG_DEBUG_FS
-	debugfs_remove_recursive(privdata->debugfs_dir);
-#endif /* CONFIG_DEBUG_FS */
 
 	pci_intx(pci_dev, 0);
 	pci_clear_master(pci_dev);
@@ -590,7 +445,7 @@ static const struct pci_device_id amd_mp2_pci_tbl[] = {
 MODULE_DEVICE_TABLE(pci, amd_mp2_pci_tbl);
 
 static struct pci_driver amd_mp2_pci_driver = {
-	.name		= DRIVER_NAME,
+	.name		= "i2c_amd_mp2",
 	.id_table	= amd_mp2_pci_tbl,
 	.probe		= amd_mp2_pci_probe,
 	.remove		= amd_mp2_pci_remove,
@@ -600,6 +455,7 @@ static struct pci_driver amd_mp2_pci_driver = {
 	},
 #endif
 };
+module_pci_driver(amd_mp2_pci_driver);
 
 static int amd_mp2_device_match(struct device *dev, void *data)
 {
@@ -617,34 +473,11 @@ struct amd_mp2_dev *amd_mp2_find_device(void)
 		return NULL;
 
 	pci_dev = to_pci_dev(dev);
-	if (!amd_mp2_pci_is_probed(pci_dev))
-		return NULL;
 	return (struct amd_mp2_dev *)pci_get_drvdata(pci_dev);
 }
 EXPORT_SYMBOL_GPL(amd_mp2_find_device);
 
-static int __init amd_mp2_drv_init(void)
-{
-#ifdef CONFIG_DEBUG_FS
-	debugfs_root_dir = debugfs_create_dir(KBUILD_MODNAME, NULL);
-#endif /* CONFIG_DEBUG_FS */
-
-	return pci_register_driver(&amd_mp2_pci_driver);
-}
-module_init(amd_mp2_drv_init);
-
-static void __exit amd_mp2_drv_exit(void)
-{
-	pci_unregister_driver(&amd_mp2_pci_driver);
-
-#ifdef CONFIG_DEBUG_FS
-	debugfs_remove_recursive(debugfs_root_dir);
-#endif /* CONFIG_DEBUG_FS */
-}
-module_exit(amd_mp2_drv_exit);
-
-MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_VERSION(DRIVER_VER);
+MODULE_DESCRIPTION("AMD(R) PCI-E MP2 I2C Controller Driver");
 MODULE_AUTHOR("Shyam Sundar S K <Shyam-sundar.S-k@amd.com>");
 MODULE_AUTHOR("Elie Morisse <syniurge@gmail.com>");
 MODULE_LICENSE("Dual BSD/GPL");
