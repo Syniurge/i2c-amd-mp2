@@ -10,7 +10,7 @@ This is a major rework of the proposed [MP2 I2C controller driver](https://patch
  * no timeout checks, assumed the i2c device would respond in less than 50 jiffies
  * no protection against data races
 
-This rewrite fixes all of these issues and is being submitted to the kernel.
+This rewrite fixes all of these issues and was accepted into the 5.2 kernel.
 
 ### Installation
 
